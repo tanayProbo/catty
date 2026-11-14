@@ -8,6 +8,8 @@ from typing import Callable, Literal, Optional
 
 from backend.models import RunCreate, TelemetryEventIn
 from config import (
+    BOUNCE_ESCALATION_INTERVAL_SEC,
+    BOUNCE_TIER_STEP,
     CAT_BOUNCE_FREQ,
     CAT_JUMP_DURATION_SEC,
     CAT_ROLL_DURATION_SEC,
@@ -15,6 +17,9 @@ from config import (
     CLEAR_DURATION_SEC,
     FREEZE_CLEAR_BONUS_MPS,
     HEIST_GOAL_METERS,
+    MAX_BOUNCE_MULTIPLIER,
+    MAX_BOUNCE_TIER,
+    MAX_CAT_LIVES,
     MAX_LEVEL,
     WARNING_DURATION_SEC,
     GameConfig,
@@ -62,12 +67,30 @@ class ScorePopup:
 
 
 @dataclass(slots=True)
+class BloodParticle:
+    rel_x: float
+    rel_y: float
+    vx: float
+    vy: float
+    radius: float
+    timer: float = 0.85
+
+
+@dataclass(slots=True)
+class BloodStain:
+    norm_x: float
+    norm_y: float
+    radius: float
+    alpha: int = 185
+
+
+@dataclass(slots=True)
 class GameState:
     config: GameConfig = field(default_factory=GameConfig)
     phase: Phase = Phase.MENU
 
     level: int = 1
-    level_name: str = "LOBBY VENTS"
+    level_name: str = "Anubis Foyer"
     score: int = 0
     coins: int = 0
     distance_meters: float = 0.0
@@ -79,6 +102,24 @@ class GameState:
     motion_peak: float = 0.0
     current_motion: float = 0.0
 
+    # 9 Lives & Progressive Weakness System
+    max_lives: int = MAX_CAT_LIVES
+    lives_remaining: int = MAX_CAT_LIVES
+    deaths_count: int = 0
+    cat_strength: float = 1.0
+    blood_flash_timer: float = 0.0
+    crash_invuln_timer: float = 0.0
+    blood_particles: list[BloodParticle] = field(default_factory=list)
+    blood_stains: list[BloodStain] = field(default_factory=list)
+
+    # 10-Second Escalating Bounce System (saturates at MAX_BOUNCE_TIER)
+    bounce_tier: int = 0
+    bounce_multiplier: float = 1.0
+    bounce_saturated: bool = False
+
+    # Hand Gesture Menu Start Hold
+    gesture_start_hold: float = 0.0
+
     target_lane: int = 0
     cat_lane_pos: float = 0.0
     cat_bounce_height: float = 0.0
@@ -87,8 +128,10 @@ class GameState:
     jump_grace_timer: float = 0.0
     cat_roll_timer: float = 0.0
     cat_roll_angle: float = 0.0
+    cat_crouch_depth: float = 0.0
     crouch_grace_timer: float = 0.0
     is_crouching: bool = False
+    last_human_posture: str = "STAND"
     action_banner: str = ""
     action_banner_timer: float = 0.0
     busted_reason: str = "MOTION DETECTED ON LASER SWEEP"
@@ -125,6 +168,11 @@ class GameState:
     def combo_multiplier(self) -> int:
         return min(5, 1 + (self.streak // 2))
 
+    @property
+    def effective_bounce_multiplier(self) -> float:
+        weakness_damp = 0.64 + 0.36 * self.cat_strength
+        return round(self.bounce_multiplier * weakness_damp, 3)
+
     def _emit_sound(self, name: str) -> None:
         if self.on_sound is not None:
             self.on_sound(name)
@@ -145,6 +193,36 @@ class GameState:
         if len(self.popups) >= 6:
             self.popups.pop(0)
         self.popups.append(ScorePopup(text=text, timer=0.95, lane=lane, is_gold=is_gold))
+
+    def _spawn_blood_splatter(self) -> None:
+        self.blood_flash_timer = 1.05
+        for _ in range(18):
+            angle = random.uniform(-math.pi * 0.92, -math.pi * 0.08)
+            spd = random.uniform(75.0, 240.0)
+            self.blood_particles.append(
+                BloodParticle(
+                    rel_x=random.uniform(-22.0, 22.0),
+                    rel_y=random.uniform(-28.0, 12.0),
+                    vx=math.cos(angle) * spd,
+                    vy=math.sin(angle) * spd,
+                    radius=random.uniform(3.5, 8.5),
+                    timer=random.uniform(0.55, 1.05),
+                )
+            )
+        if len(self.blood_particles) > 54:
+            self.blood_particles = self.blood_particles[-54:]
+
+        for _ in range(3):
+            self.blood_stains.append(
+                BloodStain(
+                    norm_x=max(0.12, min(0.88, 0.50 + self.cat_lane_pos * 0.16 + random.uniform(-0.14, 0.14))),
+                    norm_y=random.uniform(0.68, 0.93),
+                    radius=random.uniform(8.0, 20.0),
+                    alpha=random.randint(145, 210),
+                )
+            )
+        if len(self.blood_stains) > 27:
+            self.blood_stains = self.blood_stains[-27:]
 
     def select_starting_level(self, level_num: int) -> None:
         self.config.starting_level = max(1, min(MAX_LEVEL, level_num))
@@ -176,6 +254,20 @@ class GameState:
         self.motion_peak = 0.0
         self.current_motion = 0.0
 
+        self.max_lives = MAX_CAT_LIVES
+        self.lives_remaining = MAX_CAT_LIVES
+        self.deaths_count = 0
+        self.cat_strength = 1.0
+        self.blood_flash_timer = 0.0
+        self.crash_invuln_timer = 0.0
+        self.blood_particles.clear()
+        self.blood_stains.clear()
+
+        self.bounce_tier = 0
+        self.bounce_multiplier = 1.0
+        self.bounce_saturated = False
+        self.gesture_start_hold = 0.0
+
         self.target_lane = 0
         self.cat_lane_pos = 0.0
         self.cat_bounce_height = 0.0
@@ -184,13 +276,15 @@ class GameState:
         self.jump_grace_timer = 0.0
         self.cat_roll_timer = 0.0
         self.cat_roll_angle = 0.0
+        self.cat_crouch_depth = 0.0
         self.crouch_grace_timer = 0.0
         self.is_crouching = False
+        self.last_human_posture = "STAND"
         self.popups.clear()
         self.busted_reason = "MOTION DETECTED ON LASER SWEEP"
 
         self._apply_level_spec(lvl)
-        self.action_banner = f"LEVEL {self.level:02d}/{MAX_LEVEL:02d} // {self.level_name}"
+        self.action_banner = f"LEVEL {self.level:02d}/{MAX_LEVEL:02d} // {self.level_name} (9 LIVES ACTIVE)"
         self.action_banner_timer = 2.6
 
         self.phase_timer = 0.0
@@ -206,29 +300,41 @@ class GameState:
     def return_to_menu(self) -> None:
         self.phase = Phase.MENU
         self.flash_timer = 0.0
+        self.gesture_start_hold = 0.0
         self._apply_level_spec(self.config.starting_level)
 
-    def trigger_jump(self) -> None:
+    def trigger_jump(self, force: bool = False) -> None:
         if self.phase not in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             return
-        if self.cat_jump_timer <= 0.24:
+        was_crouching = self.is_crouching or self.cat_roll_timer > 0.0
+        if force or was_crouching or self.cat_jump_timer <= 0.14:
             self.cat_jump_timer = CAT_JUMP_DURATION_SEC
-            self.cat_jump_height = max(0.38, self.cat_jump_height)
-            self.jump_grace_timer = 0.28
+            boost = 1.0 + (self.effective_bounce_multiplier - 1.0) * 0.45
+            self.cat_jump_height = max(0.38 * boost, self.cat_jump_height)
+            self.jump_grace_timer = 0.32
             self.cat_roll_timer = 0.0
+            self.cat_crouch_depth = 0.0
+            self.crouch_grace_timer = 0.0
             self.is_crouching = False
             self._emit_sound("jump")
+        else:
+            self.jump_grace_timer = max(self.jump_grace_timer, 0.30)
 
-    def trigger_crouch_roll(self) -> None:
+    def trigger_crouch_roll(self, force: bool = False) -> None:
         if self.phase not in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             return
+        was_jumping = self.cat_jump_timer > 0.0 or self.cat_jump_height > 0.0
         self.is_crouching = True
-        self.crouch_grace_timer = 0.28
-        if self.cat_roll_timer <= 0.14:
+        self.cat_crouch_depth = 1.0
+        self.crouch_grace_timer = 0.32
+        self.cat_jump_timer = 0.0
+        self.cat_jump_height = 0.0
+        self.jump_grace_timer = 0.0
+        if force or was_jumping or self.cat_roll_timer <= 0.14:
             self.cat_roll_timer = CAT_ROLL_DURATION_SEC
-            self.cat_jump_timer = 0.0
-            self.cat_jump_height = 0.0
             self._emit_sound("roll")
+        else:
+            self.cat_roll_timer = max(self.cat_roll_timer, 0.28)
 
     def set_target_lane(self, lane: int) -> None:
         self.target_lane = max(-1, min(1, lane))
@@ -292,6 +398,36 @@ class GameState:
 
             self.next_obstacle_dist += gap
 
+    def _update_bounce_escalation(self) -> None:
+        new_tier = min(MAX_BOUNCE_TIER, int(self.elapsed_sec // BOUNCE_ESCALATION_INTERVAL_SEC))
+        if new_tier > self.bounce_tier:
+            self.bounce_tier = new_tier
+            self.bounce_multiplier = min(
+                MAX_BOUNCE_MULTIPLIER,
+                round(1.0 + self.bounce_tier * BOUNCE_TIER_STEP, 2),
+            )
+            self.bounce_saturated = self.bounce_tier >= MAX_BOUNCE_TIER
+            if self.bounce_saturated:
+                self.action_banner = f"MAX BOUNCE SATURATED ({self.bounce_multiplier:.2f}x HEIGHT)!"
+                self._add_popup(f"MAX BOUNCE {self.bounce_multiplier:.1f}x!", lane=self.target_lane, is_gold=True)
+            else:
+                self.action_banner = f"10S SURVIVED! BOUNCE TIER {self.bounce_tier}/{MAX_BOUNCE_TIER} ({self.bounce_multiplier:.2f}x)"
+                self._add_popup(f"BOUNCE UP {self.bounce_multiplier:.1f}x!", lane=self.target_lane, is_gold=True)
+            self.action_banner_timer = 1.8
+
+    def _update_blood_effects(self, dt: float) -> None:
+        if self.blood_flash_timer > 0.0:
+            self.blood_flash_timer = max(0.0, self.blood_flash_timer - dt)
+        if self.crash_invuln_timer > 0.0:
+            self.crash_invuln_timer = max(0.0, self.crash_invuln_timer - dt)
+        if self.blood_particles:
+            for bp in self.blood_particles:
+                bp.timer -= dt
+                bp.rel_x += bp.vx * dt
+                bp.rel_y += bp.vy * dt
+                bp.vy += 420.0 * dt
+            self.blood_particles = [bp for bp in self.blood_particles if bp.timer > 0.0]
+
     def update(
         self,
         dt: float,
@@ -309,6 +445,7 @@ class GameState:
             self.flash_timer = max(0.0, self.flash_timer - dt)
         if self.action_banner_timer > 0.0:
             self.action_banner_timer = max(0.0, self.action_banner_timer - dt)
+        self._update_blood_effects(dt)
 
         self.coin_spin_angle = (self.coin_spin_angle + dt * 260.0) % 360.0
         if self.popups:
@@ -316,13 +453,43 @@ class GameState:
                 p.timer -= dt
             self.popups = [p for p in self.popups if p.timer > 0.0]
 
+        # Hand-gesture start/retry when on MENU, BUSTED, or VICTORY
+        if self.phase in (Phase.MENU, Phase.BUSTED, Phase.VICTORY):
+            if human_posture == "JUMP":
+                self.gesture_start_hold += dt
+                if self.gesture_start_hold >= 0.55:
+                    self.gesture_start_hold = 0.0
+                    self.start_heist()
+                    self.last_human_posture = "JUMP"
+                    return
+            else:
+                self.gesture_start_hold = max(0.0, self.gesture_start_hold - dt * 1.5)
+
         if human_lane is not None and self.phase in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             self.set_target_lane(human_lane)
         if human_posture is not None and self.phase in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
+            posture_changed = human_posture != self.last_human_posture
+            self.last_human_posture = human_posture
             if human_posture == "JUMP":
-                self.trigger_jump()
+                if posture_changed or self.cat_jump_timer <= 0.0:
+                    self.trigger_jump(force=True)
+                else:
+                    boost = 1.0 + (self.effective_bounce_multiplier - 1.0) * 0.45
+                    self.cat_jump_timer = max(self.cat_jump_timer, 0.35)
+                    self.cat_jump_height = max(0.68 * boost, self.cat_jump_height)
+                    self.jump_grace_timer = 0.32
+                    self.is_crouching = False
+                    self.cat_roll_timer = 0.0
             elif human_posture == "CROUCH":
-                self.trigger_crouch_roll()
+                if posture_changed or self.cat_roll_timer <= 0.0:
+                    self.trigger_crouch_roll(force=True)
+                else:
+                    self.is_crouching = True
+                    self.cat_crouch_depth = 1.0
+                    self.cat_roll_timer = max(self.cat_roll_timer, 0.35)
+                    self.crouch_grace_timer = 0.32
+                    self.cat_jump_timer = 0.0
+                    self.cat_jump_height = 0.0
             else:
                 self.is_crouching = False
 
@@ -343,6 +510,7 @@ class GameState:
             return
 
         self.elapsed_sec += dt
+        self._update_bounce_escalation()
         self.laser_sweep_offset = (self.laser_sweep_offset + dt * 1.4) % 1.0
 
         lane_diff = float(self.target_lane) - self.cat_lane_pos
@@ -351,8 +519,10 @@ class GameState:
         if self.cat_jump_timer > 0.0:
             self.cat_jump_timer = max(0.0, self.cat_jump_timer - dt)
             prog = 1.0 - (self.cat_jump_timer / CAT_JUMP_DURATION_SEC)
-            self.cat_jump_height = max(0.25, math.sin(prog * math.pi))
-            self.jump_grace_timer = 0.25
+            arc = math.sin((prog ** 0.82) * math.pi)
+            boost = 1.0 + (self.effective_bounce_multiplier - 1.0) * 0.45
+            self.cat_jump_height = max(0.22 if self.cat_jump_timer > 0.04 else 0.0, arc * boost)
+            self.jump_grace_timer = 0.30
         else:
             self.cat_jump_height = 0.0
             if self.jump_grace_timer > 0.0:
@@ -362,16 +532,22 @@ class GameState:
             self.cat_roll_timer = max(0.0, self.cat_roll_timer - dt)
             prog = 1.0 - (self.cat_roll_timer / CAT_ROLL_DURATION_SEC)
             self.cat_roll_angle = (prog * 360.0) % 360.0
-            self.crouch_grace_timer = 0.25
+            self.crouch_grace_timer = 0.30
+            self.cat_crouch_depth = min(1.0, self.cat_crouch_depth + dt * 14.0)
+            if self.cat_roll_timer <= 0.0:
+                self.is_crouching = False
         else:
+            self.is_crouching = False
             self.cat_roll_angle = 0.0
+            self.cat_crouch_depth = max(0.0, self.cat_crouch_depth - dt * 10.0)
             if self.crouch_grace_timer > 0.0:
                 self.crouch_grace_timer = max(0.0, self.crouch_grace_timer - dt)
 
         spec = self.level_spec
 
         if self.phase == Phase.CREEPING:
-            speed = spec.roll_speed_mps if self.is_rolling else spec.walk_speed_mps
+            base_speed = spec.roll_speed_mps if self.is_rolling else spec.walk_speed_mps
+            speed = base_speed * (0.58 + 0.42 * self.cat_strength)
             self._advance_cat(dt, speed)
             self._spawn_obstacles_ahead()
             self._check_coins()
@@ -397,12 +573,18 @@ class GameState:
             grace_elapsed = (self.config.freeze_duration - self.phase_timer) >= 0.15
             if grace_elapsed and motion_score > self.config.motion_threshold:
                 self.busted_reason = f"MOVED DURING LEVEL {self.level} LASER FREEZE"
-                self._trigger_busted(motion_score, is_simulation)
+                self._register_crash_or_death(
+                    self.busted_reason,
+                    motion_score,
+                    is_simulation,
+                    fatal_if_no_gesture=(human_lane is None and human_posture is None),
+                )
             elif self.phase_timer <= 0.0:
                 self._enter_clear()
 
         elif self.phase == Phase.CLEAR:
-            self._advance_cat(dt, max(FREEZE_CLEAR_BONUS_MPS, spec.walk_speed_mps + 2.2))
+            base_clear_spd = max(FREEZE_CLEAR_BONUS_MPS, spec.walk_speed_mps + 2.2)
+            self._advance_cat(dt, base_clear_spd * (0.58 + 0.42 * self.cat_strength))
             self._spawn_obstacles_ahead()
             self._check_coins()
             if human_lane is not None or human_posture is not None:
@@ -423,21 +605,25 @@ class GameState:
             if coin.collected:
                 continue
             rel = coin.distance_m - dist
-            if rel > 0.65:
+            if rel > 0.70:
                 continue
-            if rel < -0.55:
+            if rel < -0.60:
                 coin.collected = True
                 continue
 
             lane_ok = (
-                abs(self.cat_lane_pos - float(coin.lane)) <= 0.65
+                abs(self.cat_lane_pos - float(coin.lane)) <= 0.68
                 or self.target_lane == coin.lane
             )
             if not lane_ok:
                 continue
-            if coin.tier == "AIR" and not (self.cat_jump_height > 0.12 or self.cat_jump_timer > 0.0):
+            if coin.tier == "AIR" and not (
+                self.cat_jump_height > 0.10 or self.cat_jump_timer > 0.0 or self.jump_grace_timer > 0.0
+            ):
                 continue
-            if coin.tier == "LOW_ROLL" and not (self.is_rolling or self.crouch_grace_timer > 0.0):
+            if coin.tier == "LOW_ROLL" and not (
+                self.is_rolling or self.is_crouching or self.crouch_grace_timer > 0.0
+            ):
                 continue
 
             coin.collected = True
@@ -467,9 +653,9 @@ class GameState:
             if obs.cleared:
                 continue
             rel = obs.distance_m - dist
-            if rel > 0.55:
+            if rel > 0.60:
                 continue
-            if rel < -0.45:
+            if rel < -0.50:
                 obs.cleared = True
                 continue
 
@@ -484,10 +670,10 @@ class GameState:
                     self.action_banner_timer = 1.4
                     self._add_popup(f"ROLL +{pts}", lane=self.target_lane, is_gold=False)
                     self._emit_sound("dodge")
-                else:
+                elif rel <= 0.12:
                     obs.cleared = True
-                    self.busted_reason = "HIT HIGH LASER GATE (CROUCH TO ROLL UNDER)"
-                    self._trigger_busted(self.current_motion, is_simulation)
+                    self.busted_reason = "HIT HIGH LASER GATE (FIST / CROUCH TO ROLL)"
+                    self._register_crash_or_death(self.busted_reason, self.current_motion, is_simulation)
                     return
 
             elif obs.kind == "LOW_BEAM":
@@ -505,16 +691,16 @@ class GameState:
                     self.action_banner_timer = 1.4
                     self._add_popup(f"JUMP +{pts}", lane=self.target_lane, is_gold=False)
                     self._emit_sound("dodge")
-                else:
+                elif rel <= 0.12:
                     obs.cleared = True
-                    self.busted_reason = "TRIPPED FLOOR LASER (JUMP OVER IT)"
-                    self._trigger_busted(self.current_motion, is_simulation)
+                    self.busted_reason = "TRIPPED SARCOPHAGUS LASER (OPEN PALM / JUMP)"
+                    self._register_crash_or_death(self.busted_reason, self.current_motion, is_simulation)
                     return
 
             elif obs.kind == "SIDE_BLOCK":
                 if (
                     self.target_lane != obs.lane
-                    or abs(self.cat_lane_pos - float(obs.lane)) >= 0.40
+                    or abs(self.cat_lane_pos - float(obs.lane)) >= 0.38
                     or self.cat_jump_height > 0.45
                 ):
                     obs.cleared = True
@@ -526,10 +712,10 @@ class GameState:
                     self.action_banner_timer = 1.2
                     self._add_popup(f"DODGE +{pts}", lane=self.target_lane, is_gold=False)
                     self._emit_sound("dodge")
-                else:
+                elif rel <= 0.12:
                     obs.cleared = True
-                    self.busted_reason = "HIT SECURITY PYLON (STEP LEFT OR RIGHT)"
-                    self._trigger_busted(self.current_motion, is_simulation)
+                    self.busted_reason = "HIT PHARAOH PYLON (MOVE HAND LEFT OR RIGHT)"
+                    self._register_crash_or_death(self.busted_reason, self.current_motion, is_simulation)
                     return
 
     def _advance_cat(self, dt: float, speed_mps: float) -> None:
@@ -538,7 +724,7 @@ class GameState:
         self.total_distance_meters += delta_m
         self.score += int(round(delta_m * (22.0 + self.level * 3.0) * self.combo_multiplier))
         self.walk_cycle += dt * CAT_BOUNCE_FREQ * (speed_mps / CAT_WALK_SPEED_MPS)
-        self.cat_bounce_height = abs(math.sin(self.walk_cycle))
+        self.cat_bounce_height = abs(math.sin(self.walk_cycle)) * self.effective_bounce_multiplier
         self.step_sound_timer -= dt
         if self.step_sound_timer <= 0.0:
             self._emit_sound("step")
@@ -568,7 +754,51 @@ class GameState:
         self._emit_sound("clear")
         self._record_telemetry("FREEZE_PASS", self.current_motion)
 
+    def _register_crash_or_death(
+        self,
+        reason: str,
+        motion_score: float,
+        is_simulation: bool,
+        fatal_if_no_gesture: bool = False,
+    ) -> None:
+        """
+        Handles a cat crash or laser zap:
+        - Spawns crimson blood splatter particles & floor/screen blood stains
+        - Consumes 1 of the cat's 9 lives and weakens the cat (up to 9 times)
+        - When all 9 lives are exhausted (or fatal_if_no_gesture is set), triggers final BUSTED
+        """
+        self._spawn_blood_splatter()
+        self.deaths_count = min(self.max_lives, self.deaths_count + 1)
+        self.lives_remaining = max(0, self.max_lives - self.deaths_count)
+        self.cat_strength = max(0.20, round(1.0 - self.deaths_count * 0.088, 3))
+        self.streak = 0
+        self.crash_invuln_timer = 0.85
+
+        if self.lives_remaining <= 0 or fatal_if_no_gesture:
+            self._trigger_busted(motion_score, is_simulation)
+        else:
+            self.flash_timer = 0.65
+            self._emit_sound("alarm")
+            self._record_telemetry("MOTION_DETECTED", motion_score)
+            strength_pct = int(round(self.cat_strength * 100))
+            self.action_banner = (
+                f"CRASH! -1 LIFE ({self.lives_remaining}/{self.max_lives} LEFT) // "
+                f"CAT WEAKENED TO {strength_pct}%"
+            )
+            self.action_banner_timer = 2.2
+            self._add_popup(
+                f"BLOOD! {self.lives_remaining}/{self.max_lives} LIVES ({strength_pct}%)",
+                lane=self.target_lane,
+                is_gold=False,
+            )
+            if self.phase == Phase.FREEZE:
+                self.phase = Phase.CREEPING
+                spec = self.level_spec
+                self.next_sweep_timer = random.uniform(spec.sweep_min_sec, spec.sweep_max_sec)
+
     def _trigger_busted(self, motion_score: float, is_simulation: bool) -> None:
+        if self.blood_flash_timer <= 0.0:
+            self._spawn_blood_splatter()
         self.phase = Phase.BUSTED
         self.flash_timer = 1.2
         self.cat_chase_offset = 0.0

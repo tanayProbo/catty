@@ -21,6 +21,16 @@ from config import (
 )
 
 PostureType = Literal["STAND", "JUMP", "CROUCH"]
+HandGestureType = Literal[
+    "BOTH_HANDS_UP",
+    "BOTH_HANDS_DOWN",
+    "ONE_HAND_LEFT",
+    "ONE_HAND_RIGHT",
+    "HANDS_NEUTRAL",
+    "OPEN_PALM",
+    "CLOSED_FIST",
+    "NEUTRAL_HAND",
+]
 
 
 @dataclass(slots=True)
@@ -34,12 +44,15 @@ class MotionSample:
     human_posture: PostureType = "STAND"
     body_x: float = 0.5
     body_y: float = 0.5
+    hand_gesture: HandGestureType = "HANDS_NEUTRAL"
+    finger_count: int = 0
+    hand_detected: bool = False
 
 
 def _fast_mask_stats(mask: np.ndarray) -> tuple[int, float, float, float, float]:
     row_counts = np.count_nonzero(mask, axis=1)
     total = int(row_counts.sum())
-    if total < 30:
+    if total < 24:
         return total, 0.5, 0.5, 0.5, 0.5
 
     col_counts = np.count_nonzero(mask, axis=0)
@@ -71,15 +84,31 @@ class MotionTracker:
 
         self._cap: Optional[cv2.VideoCapture] = None
         self._is_simulation = force_simulation
-        self._status_label = "STARTING"
+        self._status_label = "Starting"
 
-        # Pre-allocated image buffers for the vision loop
+        # Pre-allocated image buffers for the vision loop (zero per-frame heap churn)
         self._prev_gray: Optional[np.ndarray] = None
+        self._bg_gray: Optional[np.ndarray] = None
+        self._frame_count: int = 0
         self._gray_buf = np.empty((height, width), dtype=np.uint8)
         self._blur_buf = np.empty((height, width), dtype=np.uint8)
         self._delta_buf = np.empty((height, width), dtype=np.uint8)
         self._mask_buf = np.empty((height, width), dtype=np.uint8)
+        self._fg_curr_buf = np.empty((height, width), dtype=np.uint8)
+        self._fg_prev_buf = np.empty((height, width), dtype=np.uint8)
+        self._fg_mask_buf = np.empty((height, width), dtype=np.uint8)
+        self._motion_mask_buf = np.empty((height, width), dtype=np.uint8)
+        self._fg_motion_mask = np.empty((height, width), dtype=np.uint8)
+        self._arriving_mask = np.empty((height, width), dtype=np.uint8)
+        self._departing_mask = np.empty((height, width), dtype=np.uint8)
+        self._ycrcb_buf = np.empty((height, width, 3), dtype=np.uint8)
+        self._hsv_buf = np.empty((height, width, 3), dtype=np.uint8)
+        self._skin_mask = np.empty((height, width), dtype=np.uint8)
+        self._skin_hsv_mask = np.empty((height, width), dtype=np.uint8)
+        self._combined_hand_mask = np.empty((height, width), dtype=np.uint8)
+        self._morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         self._small_gray = np.empty((height // 2, width // 2), dtype=np.uint8)
+        self._eq_small_gray = np.empty((height // 2, width // 2), dtype=np.uint8)
         self._latest_rgb = np.zeros((height, width, 3), dtype=np.uint8)
 
         self._motion_score: float = 0.0
@@ -87,18 +116,31 @@ class MotionTracker:
         self._sim_phase: float = 0.0
         self._consecutive_failures: int = 0
 
+        # Persistent face anchor & adaptive skin calibration
         self._face_cascade = self._load_cascade("haarcascade_frontalface_default.xml")
+        self._face_box_smooth: Optional[tuple[float, float, float, float]] = None
+        self._face_last_seen: float = 0.0
+        self._face_cr: Optional[float] = None
+        self._face_cb: Optional[float] = None
+
+        # Smoothed hand kinematics & persistence
         self._smoothed_x: float = 0.50
         self._smoothed_y: float = 0.50
         self._prev_raw_x: float = 0.50
         self._prev_raw_y: float = 0.50
         self._neutral_y: float = 0.50
+        self._neutral_initialized: bool = False
         self._human_lane: int = 0
         self._human_posture: PostureType = "STAND"
+        self._hand_gesture: HandGestureType = "HANDS_NEUTRAL"
+        self._finger_count: int = 0
+        self._hand_detected: bool = False
+        self._detected_hands: list[tuple[float, float]] = []
+        self._last_valid_hands: list[tuple[float, float]] = []
+        self._last_valid_hands_time: float = 0.0
+        self._last_hand_contours: list[np.ndarray] = []
         self._jump_hold_until: float = 0.0
         self._crouch_hold_until: float = 0.0
-        self._crouch_suppress_until: float = 0.0
-        self._jump_suppress_until: float = 0.0
 
         self._sim_lane_override: Optional[int] = None
         self._sim_posture_override: Optional[PostureType] = None
@@ -127,7 +169,7 @@ class MotionTracker:
             self._open_camera()
         else:
             self._is_simulation = True
-            self._status_label = "SIMULATION"
+            self._status_label = "Hands Sim Mode"
 
         self._running = True
         self._thread = threading.Thread(
@@ -154,9 +196,11 @@ class MotionTracker:
                 if ret and frame is not None and frame.size > 0:
                     self._cap = cap
                     self._is_simulation = False
-                    self._status_label = "WEBCAM LIVE"
+                    self._status_label = "Hands Cam Live"
                     self._consecutive_failures = 0
                     self._prev_gray = None
+                    self._bg_gray = None
+                    self._frame_count = 0
                     return
             if cap is not None:
                 cap.release()
@@ -165,8 +209,10 @@ class MotionTracker:
 
         self._cap = None
         self._is_simulation = True
-        self._status_label = "NO CAMERA (SIM)"
+        self._status_label = "Hands Sim Mode"
         self._prev_gray = None
+        self._bg_gray = None
+        self._frame_count = 0
 
     def _release_camera(self) -> None:
         if self._cap is not None:
@@ -180,11 +226,14 @@ class MotionTracker:
         with self._lock:
             self._force_simulation = enabled
             self._prev_gray = None
+            self._bg_gray = None
+            self._frame_count = 0
             self._motion_score = 0.0
+            self._last_valid_hands = []
             if enabled:
                 self._release_camera()
                 self._is_simulation = True
-                self._status_label = "SIMULATION"
+                self._status_label = "Hands Sim Mode"
             else:
                 self._open_camera()
 
@@ -198,100 +247,347 @@ class MotionTracker:
         posture: Optional[PostureType],
     ) -> None:
         with self._lock:
+            was_posture_ovr = self._sim_posture_override is not None
             self._sim_lane_override = lane
             self._sim_posture_override = posture
-            if posture is None:
+            if lane is not None:
+                self._human_lane = lane
+                self._smoothed_x = 0.20 if lane < 0 else (0.80 if lane > 0 else 0.50)
+                if lane < 0:
+                    self._hand_gesture = "ONE_HAND_LEFT"
+                    self._finger_count = 1
+                elif lane > 0:
+                    self._hand_gesture = "ONE_HAND_RIGHT"
+                    self._finger_count = 1
+            if posture is not None:
+                self._human_posture = posture
+                if posture == "JUMP":
+                    self._smoothed_y = 0.18
+                    self._hand_gesture = "BOTH_HANDS_UP"
+                    self._finger_count = 2
+                elif posture == "CROUCH":
+                    self._smoothed_y = 0.80
+                    self._hand_gesture = "BOTH_HANDS_DOWN"
+                    self._finger_count = 2
+                else:
+                    self._hand_gesture = "HANDS_NEUTRAL"
+                    self._finger_count = 1
+            elif was_posture_ovr:
                 self._crouch_hold_until = 0.0
-                self._jump_suppress_until = 0.0
+                self._jump_hold_until = 0.0
 
     def calibrate_neutral(self) -> None:
         with self._lock:
-            self._neutral_y = max(0.32, min(0.68, self._smoothed_y))
+            self._neutral_y = max(0.24, min(0.76, self._smoothed_y))
+            self._neutral_initialized = True
             self._jump_hold_until = 0.0
             self._crouch_hold_until = 0.0
+            self._bg_gray = None
+            self._frame_count = 0
+            self._last_valid_hands = []
 
     def reset_reference(self) -> None:
         with self._lock:
             self._prev_gray = None
             self._motion_score = 0.0
 
+    def _update_face_and_skin_calibration(
+        self, frame_bgr: np.ndarray, gray: np.ndarray, now: float
+    ) -> Optional[tuple[int, int, int, int]]:
+        """
+        Detects the user's face, persists the smoothed anchor box across brief dropouts (1.2s),
+        and adaptively samples the face center (Cr, Cb) to tune skin detection to room lighting.
+        """
+        detected_box: Optional[tuple[float, float, float, float]] = None
+        if self._face_cascade is not None and (self._frame_count <= 2 or self._frame_count % 5 == 0):
+            try:
+                cv2.resize(
+                    gray,
+                    (self.width // 2, self.height // 2),
+                    dst=self._small_gray,
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                cv2.equalizeHist(self._small_gray, self._eq_small_gray)
+                faces = self._face_cascade.detectMultiScale(
+                    self._eq_small_gray,
+                    scaleFactor=1.15,
+                    minNeighbors=3,
+                    minSize=(14, 14),
+                )
+                if len(faces) > 0:
+                    fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
+                    detected_box = (float(fx * 2), float(fy * 2), float(fw * 2), float(fh * 2))
+            except Exception:
+                pass
+
+        if detected_box is not None:
+            if self._face_box_smooth is None:
+                self._face_box_smooth = detected_box
+            else:
+                ax, ay, aw, ah = self._face_box_smooth
+                bx, by, bw, bh = detected_box
+                self._face_box_smooth = (
+                    ax * 0.65 + bx * 0.35,
+                    ay * 0.65 + by * 0.35,
+                    aw * 0.65 + bw * 0.35,
+                    ah * 0.65 + bh * 0.35,
+                )
+            self._face_last_seen = now
+
+            # Sample center patch of face in YCrCb to adapt skin tone to current lighting
+            fx, fy, fw, fh = detected_box
+            x0 = max(0, int(fx + fw * 0.28))
+            x1 = min(self.width, int(fx + fw * 0.72))
+            y0 = max(0, int(fy + fh * 0.26))
+            y1 = min(self.height, int(fy + fh * 0.66))
+            if x1 > x0 + 4 and y1 > y0 + 4:
+                patch = self._ycrcb_buf[y0:y1, x0:x1]
+                med_cr = float(np.median(patch[:, :, 1]))
+                med_cb = float(np.median(patch[:, :, 2]))
+                if 125.0 <= med_cr <= 185.0 and 70.0 <= med_cb <= 140.0:
+                    if self._face_cr is None or self._face_cb is None:
+                        self._face_cr = med_cr
+                        self._face_cb = med_cb
+                    else:
+                        self._face_cr = self._face_cr * 0.80 + med_cr * 0.20
+                        self._face_cb = self._face_cb * 0.80 + med_cb * 0.20
+
+        if self._face_box_smooth is not None and (now - self._face_last_seen) <= 1.2:
+            sx, sy, sw, sh = self._face_box_smooth
+            return int(sx), int(sy), int(sw), int(sh)
+        return None
+
+    def _detect_hands_only(
+        self,
+        frame_bgr: np.ndarray,
+        gray: np.ndarray,
+        delta: Optional[np.ndarray],
+        now: float,
+    ) -> list[tuple[float, float]]:
+        """
+        Foreground-Gated Dual-Hand Detector:
+        - Converts frame to YCrCb & HSV once.
+        - Uses persistent face anchor (1.2s) + adaptive face skin calibration (Cr/Cb +-20).
+        - Gates the skin mask strictly with (fg_mask | motion_mask) to eliminate 100% of static
+          background walls/furniture, while unioning strong arriving motion for dim light & tests.
+        - Masks out the face region and extracts up to 2 hand centroids sorted left-to-right.
+        """
+        cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb, dst=self._ycrcb_buf)
+        face_box = self._update_face_and_skin_calibration(frame_bgr, gray, now)
+
+        if self._face_cr is not None and self._face_cb is not None:
+            cr_lo = max(124, int(self._face_cr - 20))
+            cr_hi = min(195, int(self._face_cr + 20))
+            cb_lo = max(65, int(self._face_cb - 20))
+            cb_hi = min(145, int(self._face_cb + 20))
+            cv2.inRange(self._ycrcb_buf, (20, cr_lo, cb_lo), (255, cr_hi, cb_hi), dst=self._skin_mask)
+        else:
+            cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV, dst=self._hsv_buf)
+            cv2.inRange(self._ycrcb_buf, (20, 132, 77), (255, 179, 132), dst=self._skin_mask)
+            cv2.inRange(self._hsv_buf, (0, 26, 40), (28, 250, 255), dst=self._skin_hsv_mask)
+            cv2.bitwise_and(self._skin_mask, self._skin_hsv_mask, dst=self._skin_mask)
+
+        # Foreground mask (absdiff vs learned background >= 14) + Motion mask (delta >= 12)
+        cv2.threshold(self._fg_curr_buf, 14, 255, cv2.THRESH_BINARY, dst=self._fg_mask_buf)
+        if delta is not None:
+            cv2.threshold(delta, 12, 255, cv2.THRESH_BINARY, dst=self._motion_mask_buf)
+            cv2.bitwise_or(self._fg_mask_buf, self._motion_mask_buf, dst=self._fg_motion_mask)
+        else:
+            np.copyto(self._fg_motion_mask, self._fg_mask_buf)
+
+        # Gate skin mask with foreground/motion so static walls & furniture are ignored
+        cv2.bitwise_and(self._skin_mask, self._fg_motion_mask, dst=self._combined_hand_mask)
+
+        # Union strong arriving motion so hands in dim light or synthetic frames always trigger
+        if delta is not None:
+            arr_count = int(np.count_nonzero(self._arriving_mask))
+            if arr_count >= 25:
+                cv2.bitwise_or(self._combined_hand_mask, self._arriving_mask, dst=self._combined_hand_mask)
+
+        # Erase the persistent face box so the head never registers as a hand
+        if face_box is not None:
+            fx, fy, fw, fh = face_box
+            pad_x = max(0, fx - int(fw * 0.22))
+            pad_y = max(0, fy - int(fh * 0.25))
+            end_x = min(self.width, fx + fw + int(fw * 0.22))
+            end_y = min(self.height, fy + int(fh * 1.25))
+            self._combined_hand_mask[pad_y:end_y, pad_x:end_x] = 0
+
+        cv2.morphologyEx(self._combined_hand_mask, cv2.MORPH_OPEN, self._morph_kernel, dst=self._combined_hand_mask)
+        cv2.morphologyEx(self._combined_hand_mask, cv2.MORPH_CLOSE, self._morph_kernel, dst=self._combined_hand_mask)
+
+        contours, _ = cv2.findContours(self._combined_hand_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        valid_contours = [c for c in contours if cv2.contourArea(c) >= 120.0]
+        valid_contours.sort(key=cv2.contourArea, reverse=True)
+
+        hands: list[tuple[float, float]] = []
+        drawn_contours: list[np.ndarray] = []
+
+        if len(valid_contours) >= 2:
+            c1, c2 = valid_contours[0], valid_contours[1]
+            a1 = float(cv2.contourArea(c1))
+            a2 = float(cv2.contourArea(c2))
+            if a2 >= max(120.0, a1 * 0.14):
+                for c in (c1, c2):
+                    m = cv2.moments(c)
+                    if m["m00"] > 0:
+                        hx = float(m["m10"] / m["m00"]) / float(self.width)
+                        hy = float(m["m01"] / m["m00"]) / float(self.height)
+                        hands.append((max(0.02, min(0.98, hx)), max(0.02, min(0.98, hy))))
+                        drawn_contours.append(c)
+                if len(hands) == 2 and abs(hands[0][0] - hands[1][0]) < 0.09:
+                    hands = [((hands[0][0] + hands[1][0]) * 0.5, min(hands[0][1], hands[1][1]))]
+                    drawn_contours = [c1]
+
+        if not hands and len(valid_contours) >= 1:
+            c1 = valid_contours[0]
+            bx, by, bw, bh = cv2.boundingRect(c1)
+            drawn_contours = [c1]
+            # Split wide connected two-hand blobs across their horizontal midpoint
+            if bw >= int(self.width * 0.34):
+                mid_x = bx + bw // 2
+                left_slice = self._combined_hand_mask[by : by + bh, bx:mid_x]
+                right_slice = self._combined_hand_mask[by : by + bh, mid_x : bx + bw]
+                lc, lx, _, lmed_y, _ = _fast_mask_stats(left_slice)
+                rc, rx, _, rmed_y, _ = _fast_mask_stats(right_slice)
+                if lc >= 40 and rc >= 40:
+                    lh_x = (float(bx) + lx * float(bw * 0.5)) / float(self.width)
+                    lh_y = (float(by) + lmed_y * float(bh)) / float(self.height)
+                    rh_x = (float(mid_x) + rx * float(bw * 0.5)) / float(self.width)
+                    rh_y = (float(by) + rmed_y * float(bh)) / float(self.height)
+                    hands = [(max(0.02, min(0.98, lh_x)), max(0.02, min(0.98, lh_y))),
+                             (max(0.02, min(0.98, rh_x)), max(0.02, min(0.98, rh_y)))]
+
+            if not hands:
+                m = cv2.moments(c1)
+                if m["m00"] > 0:
+                    hx = float(m["m10"] / m["m00"]) / float(self.width)
+                    hy = float(m["m01"] / m["m00"]) / float(self.height)
+                    hands = [(max(0.02, min(0.98, hx)), max(0.02, min(0.98, hy)))]
+
+        hands.sort(key=lambda pt: pt[0])
+        if hands:
+            self._last_valid_hands = hands
+            self._last_valid_hands_time = now
+            self._last_hand_contours = drawn_contours
+            self._detected_hands = hands
+            return hands
+
+        # Short pose persistence (0.40s) when hands are held stationary
+        if self._last_valid_hands and (now - self._last_valid_hands_time) <= 0.40:
+            self._detected_hands = list(self._last_valid_hands)
+            self._last_hand_contours = []
+            return self._detected_hands
+
+        self._last_hand_contours = []
+        self._detected_hands = []
+        return []
+
     def _detect_human_pose(
         self,
+        frame_bgr: np.ndarray,
         gray: np.ndarray,
         delta: Optional[np.ndarray],
         is_sim: bool,
         lane_override: Optional[int],
         posture_override: Optional[PostureType],
     ) -> tuple[float, float, int, PostureType]:
+        """
+        Hands-Only Gesture Control Logic:
+        - BOTH HANDS RAISED (or raised contour in Top Jump Zone) -> JUMP
+        - BOTH HANDS LOWERED (or lowered contour in Bottom Duck Zone) -> CROUCH
+        - ANY ONE HAND MOVED LEFT OR RIGHT (middle band) -> STEER LEFT (-1) OR RIGHT (+1)
+        """
         now = time.perf_counter()
+        jump_enter = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.08))
+        jump_exit = jump_enter + 0.035
+        crouch_enter = min(0.82, max(CV_CROUCH_Y_THRESHOLD - 0.02, self._neutral_y + 0.08))
+        crouch_exit = crouch_enter - 0.035
+
+        left_enter = CV_LEFT_X_THRESHOLD + 0.02
+        left_exit = CV_LEFT_X_THRESHOLD + 0.055
+        right_enter = CV_RIGHT_X_THRESHOLD - 0.02
+        right_exit = CV_RIGHT_X_THRESHOLD - 0.055
+
+        hands: list[tuple[float, float]] = []
+        if not is_sim:
+            hands = self._detect_hands_only(frame_bgr, gray, delta, now)
+
+        num_hands = len(hands)
         target_x = self._smoothed_x
         target_y = self._smoothed_y
-        detected = False
-        upward_impulse_jump = False
-        downward_impulse_crouch = False
+        detected = num_hands > 0
+        both_hands_jump = False
+        both_hands_crouch = False
+        zone_lane: Optional[int] = None
 
-        if not is_sim:
-            face_found = False
-            if self._face_cascade is not None:
-                try:
-                    cv2.resize(
-                        gray,
-                        (self.width // 2, self.height // 2),
-                        dst=self._small_gray,
-                        interpolation=cv2.INTER_LINEAR,
-                    )
-                    faces = self._face_cascade.detectMultiScale(
-                        self._small_gray,
-                        scaleFactor=1.18,
-                        minNeighbors=3,
-                        minSize=(14, 14),
-                    )
-                    if len(faces) > 0:
-                        fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-                        target_x = float((fx + fw * 0.5) * 2.0) / float(self.width)
-                        target_y = float((fy + fh * 0.44) * 2.0) / float(self.height)
-                        detected = True
-                        face_found = True
-                except Exception:
-                    pass
+        if num_hands >= 2:
+            (lx, ly), (rx, ry) = hands[0], hands[1]
+            mean_x = (lx + rx) * 0.5
+            mean_y = (ly + ry) * 0.5
+            target_x = mean_x
+            target_y = mean_y
 
-            if delta is not None:
-                cv2.threshold(delta, 16, 255, cv2.THRESH_BINARY, dst=self._mask_buf)
-                count, motion_x, top_crown_y, median_y, bottom_y = _fast_mask_stats(self._mask_buf)
-                if count >= 30:
-                    upper_cut = int(self.height * 0.38)
-                    lower_cut = int(self.height * 0.62)
-                    upper_active_pct = (
-                        float(np.count_nonzero(self._mask_buf[:upper_cut, :]))
-                        / float(max(1, upper_cut * self.width))
-                    ) * 100.0
-                    lower_active_pct = (
-                        float(np.count_nonzero(self._mask_buf[lower_cut:, :]))
-                        / float(max(1, (self.height - lower_cut) * self.width))
-                    ) * 100.0
+            # Both hands raised -> JUMP
+            if (
+                (ly < jump_enter and ry < jump_enter + 0.08)
+                or (ry < jump_enter and ly < jump_enter + 0.08)
+                or mean_y < jump_enter
+            ):
+                both_hands_jump = True
+            # Both hands lowered -> CROUCH
+            elif (
+                (ly > crouch_enter and ry > crouch_enter - 0.08)
+                or (ry > crouch_enter and ly > crouch_enter - 0.08)
+                or mean_y > crouch_enter
+            ):
+                both_hands_crouch = True
 
-                    if not face_found:
-                        target_x = motion_x
-                        if lower_active_pct > upper_active_pct * 1.45 and top_crown_y > self._neutral_y - 0.02:
-                            target_y = max(median_y, bottom_y - 0.06)
-                        else:
-                            target_y = min(self._smoothed_y, top_crown_y + 0.05)
-                        detected = True
-                    else:
-                        target_x = target_x * 0.72 + motion_x * 0.28
-                        if top_crown_y + 0.04 < target_y:
-                            target_y = top_crown_y + 0.04
+            if lx < left_enter and rx <= right_enter:
+                zone_lane = -1
+                target_x = lx
+            elif rx > right_enter and lx >= left_enter:
+                zone_lane = 1
+                target_x = rx
+            else:
+                zone_lane = 0
 
-                    vy = target_y - self._prev_raw_y
-                    if (vy < -0.026 and top_crown_y < self._neutral_y - 0.03) or (
-                        upper_active_pct > 3.6 and top_crown_y < self._neutral_y - 0.04
-                    ):
-                        upward_impulse_jump = True
-                    elif now >= self._crouch_suppress_until and (
-                        (vy > 0.026 and median_y > self._neutral_y + 0.04)
-                        or (lower_active_pct > 4.2 and top_crown_y > self._neutral_y + 0.03)
-                    ):
-                        downward_impulse_crouch = True
+        elif num_hands == 1:
+            hx, hy = hands[0]
+            target_x = hx
+            if hx < left_enter:
+                zone_lane = -1
+            elif hx > right_enter:
+                zone_lane = 1
+            else:
+                zone_lane = 0
+
+            # Allow single merged/clear contour in Top/Bottom zones to trigger Jump/Crouch,
+            # while clamping middle-band steering strictly to neutral Y so L/R never false-triggers!
+            if hy < jump_enter:
+                target_y = hy
+                both_hands_jump = True
+            elif hy > crouch_enter:
+                target_y = hy
+                both_hands_crouch = True
+            else:
+                target_y = self._neutral_y
+
+        # Check vertical zone-energy on real webcam frames when skin+fg pixels are active
+        if not is_sim and lane_override is None and posture_override is None:
+            top_row = int(self.height * jump_enter)
+            bot_row = int(self.height * crouch_enter)
+            top_px = int(np.count_nonzero(self._combined_hand_mask[:top_row, :]))
+            mid_px = int(np.count_nonzero(self._combined_hand_mask[top_row:bot_row, :]))
+            bot_px = int(np.count_nonzero(self._combined_hand_mask[bot_row:, :]))
+            if top_px >= 220 and top_px > bot_px * 2 and top_px >= mid_px * 0.65:
+                both_hands_jump = True
+                target_y = min(target_y, jump_enter - 0.05)
+                detected = True
+            elif bot_px >= 220 and bot_px > top_px * 2 and bot_px >= mid_px * 0.65:
+                both_hands_crouch = True
+                target_y = max(target_y, crouch_enter + 0.05)
+                detected = True
 
         if lane_override is not None:
             target_x = 0.20 if lane_override < 0 else (0.80 if lane_override > 0 else 0.50)
@@ -302,36 +598,41 @@ class MotionTracker:
         if posture_override is not None:
             if posture_override == "JUMP":
                 target_y = 0.18
-                upward_impulse_jump = True
+                both_hands_jump = True
+                num_hands = 2
+                self._detected_hands = [(0.34, 0.18), (0.66, 0.18)]
             elif posture_override == "CROUCH":
                 target_y = 0.80
-                downward_impulse_crouch = True
+                both_hands_crouch = True
+                num_hands = 2
+                self._detected_hands = [(0.34, 0.80), (0.66, 0.80)]
             else:
                 target_y = self._neutral_y
+                num_hands = 1
+                self._detected_hands = [(target_x, self._neutral_y)]
             detected = True
         elif is_sim:
             target_y = self._neutral_y
+            num_hands = 1
+            self._detected_hands = [(target_x, self._neutral_y)]
 
         vx = 0.0
+        vy = 0.0
         if detected or is_sim:
             vx = target_x - self._prev_raw_x
+            vy = target_y - self._prev_raw_y
             self._prev_raw_x = target_x
             self._prev_raw_y = target_y
-            self._smoothed_x = self._smoothed_x * 0.34 + target_x * 0.66
-            if target_y < self._smoothed_y:
-                self._smoothed_y = self._smoothed_y * 0.16 + target_y * 0.84
-            else:
-                self._smoothed_y = self._smoothed_y * 0.28 + target_y * 0.72
+            self._smoothed_x = self._smoothed_x * 0.30 + target_x * 0.70
+            self._smoothed_y = self._smoothed_y * 0.30 + target_y * 0.70
 
+        # Horizontal Lane Selection
         if lane_override is not None:
             lane = lane_override
+        elif zone_lane is not None:
+            lane = zone_lane
         else:
             prev_lane = self._human_lane
-            left_enter = CV_LEFT_X_THRESHOLD + 0.02
-            left_exit = CV_LEFT_X_THRESHOLD + 0.055
-            right_enter = CV_RIGHT_X_THRESHOLD - 0.02
-            right_exit = CV_RIGHT_X_THRESHOLD - 0.055
-
             if self._smoothed_x < left_enter or (vx < -0.042 and self._smoothed_x < 0.45):
                 lane = -1
             elif self._smoothed_x > right_enter or (vx > 0.042 and self._smoothed_x > 0.55):
@@ -343,36 +644,64 @@ class MotionTracker:
             else:
                 lane = 0
 
-        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.068))
-        crouch_thresh = min(0.80, max(CV_CROUCH_Y_THRESHOLD - 0.03, self._neutral_y + 0.078))
-
+        # Vertical Posture Selection
         if posture_override is not None:
             posture: PostureType = posture_override
             if posture == "JUMP":
-                self._jump_hold_until = now + 0.36
-                self._crouch_suppress_until = now + 0.62
+                self._jump_hold_until = now + 0.38
+                self._crouch_hold_until = 0.0
             elif posture == "CROUCH":
                 self._crouch_hold_until = now + 0.40
-                self._jump_suppress_until = now + 0.55
-        elif upward_impulse_jump or self._smoothed_y < jump_thresh:
-            posture = "JUMP"
-            self._jump_hold_until = now + 0.38
-            self._crouch_hold_until = 0.0
-            self._crouch_suppress_until = now + 0.65
-        elif now < self._jump_hold_until:
-            posture = "JUMP"
-        elif now >= self._crouch_suppress_until and (downward_impulse_crouch or self._smoothed_y > crouch_thresh):
-            posture = "CROUCH"
-            self._crouch_hold_until = now + 0.42
-            self._jump_suppress_until = now + 0.58
-        elif now < self._crouch_hold_until:
-            posture = "CROUCH"
+                self._jump_hold_until = 0.0
         else:
-            posture = "STAND"
-            if not is_sim and detected and abs(self._smoothed_y - self._neutral_y) < 0.055:
-                self._neutral_y = self._neutral_y * 0.97 + self._smoothed_y * 0.03
+            prev_posture = self._human_posture
+            if both_hands_jump or self._smoothed_y < jump_enter or (
+                vy < -0.040 and self._smoothed_y < self._neutral_y - 0.03
+            ):
+                posture = "JUMP"
+                self._jump_hold_until = now + 0.38
+                self._crouch_hold_until = 0.0
+            elif both_hands_crouch or self._smoothed_y > crouch_enter or (
+                vy > 0.040 and self._smoothed_y > self._neutral_y + 0.03
+            ):
+                posture = "CROUCH"
+                self._crouch_hold_until = now + 0.40
+                self._jump_hold_until = 0.0
+            elif (prev_posture == "JUMP" and self._smoothed_y < jump_exit) or (
+                now < self._jump_hold_until and self._smoothed_y < crouch_enter
+            ):
+                posture = "JUMP"
+            elif (prev_posture == "CROUCH" and self._smoothed_y > crouch_exit) or (
+                now < self._crouch_hold_until and self._smoothed_y > jump_enter
+            ):
+                posture = "CROUCH"
+            else:
+                posture = "STAND"
 
+        if posture == "JUMP":
+            gesture: HandGestureType = "BOTH_HANDS_UP"
+        elif posture == "CROUCH":
+            gesture = "BOTH_HANDS_DOWN"
+        elif lane < 0:
+            gesture = "ONE_HAND_LEFT"
+        elif lane > 0:
+            gesture = "ONE_HAND_RIGHT"
+        else:
+            gesture = "HANDS_NEUTRAL"
+
+        self._hand_detected = detected or is_sim
+        self._hand_gesture = gesture
+        self._finger_count = num_hands
         return self._smoothed_x, self._smoothed_y, lane, posture
+
+    def _tint_roi(
+        self, frame_bgr: np.ndarray, y0: int, y1: int, x0: int, x1: int, bgr: tuple[int, int, int], alpha: float = 0.25
+    ) -> None:
+        if y1 <= y0 or x1 <= x0:
+            return
+        roi = frame_bgr[y0:y1, x0:x1]
+        overlay = np.full_like(roi, bgr)
+        cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0, dst=roi)
 
     def _draw_pose_hud_on_frame(
         self,
@@ -383,36 +712,64 @@ class MotionTracker:
         posture: PostureType,
     ) -> None:
         w, h = self.width, self.height
-        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.068))
-        crouch_thresh = min(0.80, max(CV_CROUCH_Y_THRESHOLD - 0.03, self._neutral_y + 0.078))
+        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.08))
+        crouch_thresh = min(0.82, max(CV_CROUCH_Y_THRESHOLD - 0.02, self._neutral_y + 0.08))
 
         jump_y = int(h * jump_thresh)
         crouch_y = int(h * crouch_thresh)
+        neutral_y = int(h * self._neutral_y)
         left_x = int(w * (CV_LEFT_X_THRESHOLD + 0.02))
         right_x = int(w * (CV_RIGHT_X_THRESHOLD - 0.02))
 
+        # Highlight active zone with translucent neon tint
+        if posture == "JUMP":
+            self._tint_roi(frame_bgr, 0, jump_y, 0, w, (0, 215, 255), 0.26)
+        elif posture == "CROUCH":
+            self._tint_roi(frame_bgr, crouch_y, h, 0, w, (255, 195, 40), 0.26)
+        if lane < 0:
+            self._tint_roi(frame_bgr, jump_y, crouch_y, 0, left_x, (80, 240, 140), 0.22)
+        elif lane > 0:
+            self._tint_roi(frame_bgr, jump_y, crouch_y, right_x, w, (80, 240, 140), 0.22)
+
+        if self._last_hand_contours:
+            cv2.drawContours(frame_bgr, self._last_hand_contours, -1, (46, 230, 125), 2)
+
+        # Draw subtle face exclusion box when face anchor is active
+        if self._face_box_smooth is not None and (time.perf_counter() - self._face_last_seen) <= 1.2:
+            fx, fy, fw, fh = (int(v) for v in self._face_box_smooth)
+            cv2.rectangle(frame_bgr, (fx, fy), (fx + fw, fy + fh), (75, 75, 95), 1)
+
+        cv2.line(frame_bgr, (0, neutral_y), (w, neutral_y), (60, 80, 70), 1)
         cv2.line(frame_bgr, (0, jump_y), (w, jump_y), (0, 220, 255), 2 if posture == "JUMP" else 1)
         cv2.line(frame_bgr, (0, crouch_y), (w, crouch_y), (255, 200, 0), 2 if posture == "CROUCH" else 1)
-        cv2.line(frame_bgr, (left_x, 0), (left_x, h), (70, 90, 80), 1)
-        cv2.line(frame_bgr, (right_x, 0), (right_x, h), (70, 90, 80), 1)
+        cv2.line(frame_bgr, (left_x, 0), (left_x, h), (70, 210, 120) if lane < 0 else (70, 90, 80), 2 if lane < 0 else 1)
+        cv2.line(frame_bgr, (right_x, 0), (right_x, h), (70, 210, 120) if lane > 0 else (70, 90, 80), 2 if lane > 0 else 1)
 
-        cv2.putText(frame_bgr, "JUMP", (8, max(12, jump_y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 230, 255), 1)
-        cv2.putText(frame_bgr, "CROUCH", (8, min(h - 6, crouch_y + 13)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 210, 0), 1)
+        cv2.putText(frame_bgr, "2 HANDS UP: JUMP", (6, max(12, jump_y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (80, 225, 255), 1)
+        cv2.putText(frame_bgr, "2 HANDS DOWN: CROUCH", (6, min(h - 6, crouch_y + 13)), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (255, 210, 60), 1)
 
-        px, py = int(bx * w), int(by * h)
-        ret_color = (0, 255, 102)
+        ret_color = (60, 235, 130)
         if posture == "JUMP":
-            ret_color = (0, 230, 255)
+            ret_color = (80, 225, 255)
         elif posture == "CROUCH":
-            ret_color = (255, 210, 0)
+            ret_color = (255, 210, 60)
 
-        cv2.circle(frame_bgr, (px, py), 16, ret_color, 2)
-        cv2.line(frame_bgr, (px - 22, py), (px + 22, py), ret_color, 1)
-        cv2.line(frame_bgr, (px, py - 22), (px, py + 22), ret_color, 1)
+        if len(self._detected_hands) >= 2:
+            p1 = (int(self._detected_hands[0][0] * w), int(self._detected_hands[0][1] * h))
+            p2 = (int(self._detected_hands[1][0] * w), int(self._detected_hands[1][1] * h))
+            cv2.line(frame_bgr, p1, p2, ret_color, 2)
+            for idx, pt in enumerate((p1, p2)):
+                cv2.circle(frame_bgr, pt, 12, ret_color, 2)
+                cv2.circle(frame_bgr, pt, 3, ret_color, -1)
+                lbl = "L" if idx == 0 else "R"
+                cv2.putText(frame_bgr, lbl, (pt[0] - 4, pt[1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, ret_color, 1)
+        else:
+            px, py = int(bx * w), int(by * h)
+            cv2.circle(frame_bgr, (px, py), 14, ret_color, 2)
+            cv2.circle(frame_bgr, (px, py), 3, ret_color, -1)
 
-        lane_str = "LEFT" if lane < 0 else ("RIGHT" if lane > 0 else "CENTER")
-        tag = f"{lane_str} / {posture}"
-        cv2.putText(frame_bgr, tag, (w - 132, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.40, ret_color, 1)
+        gest_str = self._hand_gesture.replace("_", " ")
+        cv2.putText(frame_bgr, gest_str, (w - 142, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.34, ret_color, 1)
 
     def _compute_motion_and_pose(
         self,
@@ -429,8 +786,15 @@ class MotionTracker:
         if not is_sim:
             cv2.flip(resized, 1, dst=resized)
 
+        self._frame_count += 1
         cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY, dst=self._gray_buf)
         cv2.GaussianBlur(self._gray_buf, CV_BLUR_KERNEL, 0, dst=self._blur_buf)
+
+        if self._bg_gray is None or self._bg_gray.shape != self._blur_buf.shape:
+            med_val = int(np.median(self._blur_buf))
+            self._bg_gray = np.full_like(self._blur_buf, med_val)
+
+        cv2.absdiff(self._blur_buf, self._bg_gray, dst=self._fg_curr_buf)
 
         score = 0.0
         delta: Optional[np.ndarray] = None
@@ -443,13 +807,30 @@ class MotionTracker:
             raw_score = min(100.0, (changed_pct * 1.4) + (mean_delta * 0.6))
             score = raw_score if is_sim else (self._motion_score * 0.25 + raw_score * 0.75)
 
+            cv2.absdiff(self._prev_gray, self._bg_gray, dst=self._fg_prev_buf)
+            cv2.threshold(self._delta_buf, 17, 255, cv2.THRESH_BINARY, dst=self._motion_mask_buf)
+            cv2.subtract(self._fg_curr_buf, self._fg_prev_buf, dst=self._arriving_mask)
+            cv2.threshold(self._arriving_mask, 3, 255, cv2.THRESH_BINARY, dst=self._arriving_mask)
+            cv2.bitwise_and(self._arriving_mask, self._motion_mask_buf, dst=self._arriving_mask)
+
+            cv2.subtract(self._fg_prev_buf, self._fg_curr_buf, dst=self._departing_mask)
+            cv2.threshold(self._departing_mask, 3, 255, cv2.THRESH_BINARY, dst=self._departing_mask)
+            cv2.bitwise_and(self._departing_mask, self._motion_mask_buf, dst=self._departing_mask)
+
+            if self._frame_count <= 18 or self._frame_count % 3 == 0:
+                alpha = 0.12 if self._frame_count <= 18 else 0.03
+                cv2.addWeighted(self._blur_buf, alpha, self._bg_gray, 1.0 - alpha, 0.0, dst=self._bg_gray)
+        else:
+            self._arriving_mask.fill(0)
+            self._departing_mask.fill(0)
+
         if self._prev_gray is None:
             self._prev_gray = self._blur_buf.copy()
         else:
             np.copyto(self._prev_gray, self._blur_buf)
 
         bx, by, lane, posture = self._detect_human_pose(
-            self._gray_buf, delta, is_sim, lane_override, posture_override
+            resized, self._gray_buf, delta, is_sim, lane_override, posture_override
         )
         self._draw_pose_hud_on_frame(resized, bx, by, lane, posture)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -469,30 +850,33 @@ class MotionTracker:
         if lane_override is not None:
             cx = int(self.width * (0.20 if lane_override < 0 else (0.80 if lane_override > 0 else 0.50)))
 
-        cy = self.height // 2 + 12
+        cy = self.height // 2
         if posture_override == "JUMP":
-            cy = int(self.height * 0.22)
+            cy = int(self.height * 0.20)
         elif posture_override == "CROUCH":
-            cy = int(self.height * 0.78)
+            cy = int(self.height * 0.80)
 
         if motion_active:
             self._sim_phase += 0.45
             cx += int(np.sin(self._sim_phase) * 42)
             cy += int(np.cos(self._sim_phase * 1.3) * 18)
-            cv2.circle(frame, (cx, cy - 24), 20, (230, 230, 230), -1)
-            cv2.rectangle(frame, (cx - 28, cy - 2), (cx + 28, cy + 48), (210, 210, 210), -1)
+            cv2.circle(frame, (cx - 48, cy), 22, (230, 230, 230), -1)
+            cv2.circle(frame, (cx + 48, cy), 22, (230, 230, 230), -1)
+        elif posture_override in ("JUMP", "CROUCH"):
+            lh_x = max(32, cx - 54)
+            rh_x = min(self.width - 32, cx + 54)
+            cv2.circle(frame, (lh_x, cy), 22, (95, 165, 125), -1)
+            cv2.circle(frame, (rh_x, cy), 22, (95, 165, 125), -1)
         else:
-            cv2.circle(frame, (cx, cy - 22), 18, (90, 145, 110), -1)
-            body_h = 26 if posture_override == "CROUCH" else 46
-            cv2.rectangle(frame, (cx - 24, cy - 2), (cx + 24, cy + body_h), (80, 125, 95), -1)
+            cv2.circle(frame, (cx, cy), 24, (90, 145, 110), -1)
 
         cv2.putText(
             frame,
-            "W/S: JUMP/ROLL  A/D: LANE",
+            "2 Hands Up/Down | 1 Hand L/R",
             (10, self.height - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.38,
-            (120, 240, 160),
+            (140, 225, 175),
             1,
         )
         return frame
@@ -537,6 +921,8 @@ class MotionTracker:
                         self._is_simulation = True
                         self._status_label = "CAMERA LOST (SIM)"
                         self._prev_gray = None
+                        self._bg_gray = None
+                        self._frame_count = 0
                     sim_mode = True
                     frame_bgr = self._generate_sim_frame(sim_motion, lane_ovr, posture_ovr)
             else:
@@ -570,4 +956,7 @@ class MotionTracker:
                 human_posture=self._human_posture,
                 body_x=self._smoothed_x,
                 body_y=self._smoothed_y,
+                hand_gesture=self._hand_gesture,
+                finger_count=self._finger_count,
+                hand_detected=self._hand_detected,
             )
