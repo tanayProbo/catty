@@ -1,8 +1,9 @@
-"""Main entry point for LASER_PAW_PATROL — CV Arcade Stealth Game."""
+"""Main entry point for LASER_PAW_PATROL — Cat 3D POV + 2D Mini-Window CV Stealth Runner."""
 
 from __future__ import annotations
 
 import sys
+from typing import Optional
 import pygame
 
 from audio_engine import AudioEngine
@@ -17,7 +18,7 @@ from config import (
     TARGET_FPS,
     GameConfig,
 )
-from cv_tracker import MotionTracker
+from cv_tracker import MotionTracker, PostureType
 from game_state import GameState, Phase
 from ui_renderer import UIRenderer
 
@@ -63,6 +64,7 @@ def main() -> int:
         on_submit_run=backend.submit_run_async,
     )
 
+    kb_lane: Optional[int] = None
     running = True
     try:
         while running:
@@ -98,18 +100,43 @@ def main() -> int:
                         if state.show_leaderboard:
                             state.show_leaderboard = False
                         elif state.phase in (Phase.MENU, Phase.BUSTED, Phase.VICTORY):
+                            kb_lane = None
                             state.start_heist()
 
                     elif event.key == pygame.K_r:
                         if state.phase in (Phase.BUSTED, Phase.VICTORY):
+                            kb_lane = None
                             state.start_heist()
+
+                    # Jump (Human Jump or W / UP)
+                    elif event.key in (pygame.K_w, pygame.K_UP):
+                        state.trigger_jump()
+
+                    # Crouch & Roll under obstacles (Human Crouch or S / DOWN)
+                    elif event.key in (pygame.K_s, pygame.K_DOWN):
+                        state.trigger_crouch_roll()
+
+                    # Side move Left / Right (Human side-step or A/D / Left/Right)
+                    elif event.key in (pygame.K_a, pygame.K_LEFT):
+                        state.shift_lane(-1)
+                        kb_lane = state.target_lane
+
+                    elif event.key in (pygame.K_d, pygame.K_RIGHT):
+                        state.shift_lane(1)
+                        kb_lane = state.target_lane
+
+                    # Calibrate neutral webcam standing height
+                    elif event.key == pygame.K_c:
+                        tracker.calibrate_neutral()
+                        state.action_banner = "CAMERA NEUTRAL POSTURE CALIBRATED!"
+                        state.action_banner_timer = 1.5
 
                     elif event.key == pygame.K_m:
                         cfg.simulation_mode = not cfg.simulation_mode
                         tracker.set_simulation_mode(cfg.simulation_mode)
                         _sync_settings(backend, cfg)
 
-                    elif event.key == pygame.K_a:
+                    elif event.key == pygame.K_a and (pygame.key.get_mods() & pygame.KMOD_CTRL):
                         cfg.audio_enabled = not cfg.audio_enabled
                         audio.enabled = cfg.audio_enabled
                         _sync_settings(backend, cfg)
@@ -125,15 +152,30 @@ def main() -> int:
             keys = pygame.key.get_pressed()
             tracker.set_simulated_motion(bool(keys[pygame.K_SPACE]))
 
+            # Sync held keyboard posture with CV tracker for visual feedback in CCTV box
+            posture_ovr: Optional[PostureType] = None
+            if keys[pygame.K_w] or keys[pygame.K_UP]:
+                posture_ovr = "JUMP"
+            elif keys[pygame.K_s] or keys[pygame.K_DOWN]:
+                posture_ovr = "CROUCH"
+            tracker.set_pose_overrides(kb_lane, posture_ovr)
+
             cv_sample = tracker.get_sample()
-            state.update(dt, cv_sample.motion_score, cv_sample.is_simulation)
+            # In live webcam mode (when no keyboard lane lock is set), human movement directly steers the cat
+            active_lane = kb_lane if (kb_lane is not None and cv_sample.is_simulation) else cv_sample.human_lane
+            state.update(
+                dt,
+                cv_sample.motion_score,
+                cv_sample.is_simulation,
+                human_lane=active_lane,
+                human_posture=cv_sample.human_posture,
+            )
 
             leaderboard, stats, api_online = backend.get_snapshot()
             try:
                 renderer.render(screen, state, cv_sample, leaderboard, stats, api_online)
                 pygame.display.flip()
             except pygame.error:
-                # Recover gracefully from transient surface/display errors during resize
                 pass
     finally:
         tracker.stop()

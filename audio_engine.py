@@ -8,7 +8,7 @@ import pygame
 
 
 class AudioEngine:
-    """Synthesizes cyberpunk klaxons, alarms, and chimes with zero external assets."""
+    """Synthesizes cyberpunk klaxons, alarms, jump/roll FX, and chimes with zero external assets."""
 
     SAMPLE_RATE = 22050
 
@@ -91,12 +91,37 @@ class AudioEngine:
         if snd:
             self._sounds["victory"] = snd
 
-        # 5. Subtle Paw Step
+        # 5. Subtle Bouncy Paw Step
         ts = np.linspace(0, 0.045, int(sr * 0.045), endpoint=False, dtype=np.float32)
-        step_w = np.sin(2.0 * np.pi * 190.0 * ts) * self._envelope(len(ts), 0.08, 0.7)
+        step_w = np.sin(2.0 * np.pi * 195.0 * ts) * self._envelope(len(ts), 0.08, 0.7)
         snd = self._to_sound(step_w, volume=0.10)
         if snd:
             self._sounds["step"] = snd
+
+        # 6. Cat Jump Spring (ascending frequency sweep)
+        tj = np.linspace(0, 0.18, int(sr * 0.18), endpoint=False, dtype=np.float32)
+        f_jump = np.linspace(260.0, 680.0, len(tj), dtype=np.float32)
+        p_jump = np.cumsum(2.0 * np.pi * f_jump / sr)
+        w_jump = (np.sin(p_jump) * 0.75 + np.sign(np.sin(p_jump)) * 0.25) * self._envelope(len(tj), 0.05, 0.35)
+        snd = self._to_sound(w_jump, volume=0.25)
+        if snd:
+            self._sounds["jump"] = snd
+
+        # 7. Cat Crouch-Roll Whoosh (descending synth + filtered noise spin)
+        tr = np.linspace(0, 0.22, int(sr * 0.22), endpoint=False, dtype=np.float32)
+        f_roll = np.linspace(480.0, 140.0, len(tr), dtype=np.float32)
+        p_roll = np.cumsum(2.0 * np.pi * f_roll / sr)
+        w_roll = (np.sin(p_roll) * 0.8 + np.sin(p_roll * 2.5) * 0.2) * self._envelope(len(tr), 0.06, 0.4)
+        snd = self._to_sound(w_roll, volume=0.26)
+        if snd:
+            self._sounds["roll"] = snd
+
+        # 8. Obstacle Dodge / Roll-Under Bonus Blip
+        td = np.linspace(0, 0.09, int(sr * 0.09), endpoint=False, dtype=np.float32)
+        w_dodge = np.sin(2.0 * np.pi * 880.0 * td) * self._envelope(len(td), 0.05, 0.5)
+        snd = self._to_sound(w_dodge, volume=0.22)
+        if snd:
+            self._sounds["dodge"] = snd
 
     def play(self, name: str) -> None:
         if not self.enabled or not self.available:
