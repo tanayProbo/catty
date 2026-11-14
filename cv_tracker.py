@@ -23,7 +23,7 @@ from config import (
 PostureType = Literal["STAND", "JUMP", "CROUCH"]
 
 
-@dataclass
+@dataclass(slots=True)
 class MotionSample:
     motion_score: float
     frame_rgb: np.ndarray
@@ -34,6 +34,26 @@ class MotionSample:
     human_posture: PostureType = "STAND"
     body_x: float = 0.5
     body_y: float = 0.5
+
+
+def _fast_mask_stats(mask: np.ndarray) -> tuple[int, float, float, float, float]:
+    row_counts = np.count_nonzero(mask, axis=1)
+    total = int(row_counts.sum())
+    if total < 30:
+        return total, 0.5, 0.5, 0.5, 0.5
+
+    col_counts = np.count_nonzero(mask, axis=0)
+    row_cdf = np.cumsum(row_counts)
+    col_cdf = np.cumsum(col_counts)
+
+    h = float(mask.shape[0])
+    w = float(mask.shape[1])
+
+    med_x = float(np.searchsorted(col_cdf, total * 0.50)) / w
+    top_y = float(np.searchsorted(row_cdf, total * 0.16)) / h
+    med_y = float(np.searchsorted(row_cdf, total * 0.50)) / h
+    bot_y = float(np.searchsorted(row_cdf, total * 0.84)) / h
+    return total, med_x, top_y, med_y, bot_y
 
 
 class MotionTracker:
@@ -52,9 +72,16 @@ class MotionTracker:
         self._cap: Optional[cv2.VideoCapture] = None
         self._is_simulation = force_simulation
         self._status_label = "STARTING"
+
+        # Pre-allocated image buffers for the vision loop
         self._prev_gray: Optional[np.ndarray] = None
-        self._bg_float: Optional[np.ndarray] = None
-        self._latest_rgb: np.ndarray = self._blank_frame()
+        self._gray_buf = np.empty((height, width), dtype=np.uint8)
+        self._blur_buf = np.empty((height, width), dtype=np.uint8)
+        self._delta_buf = np.empty((height, width), dtype=np.uint8)
+        self._mask_buf = np.empty((height, width), dtype=np.uint8)
+        self._small_gray = np.empty((height // 2, width // 2), dtype=np.uint8)
+        self._latest_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+
         self._motion_score: float = 0.0
         self._sim_motion_trigger: bool = False
         self._sim_phase: float = 0.0
@@ -93,9 +120,6 @@ class MotionTracker:
             pass
         return None
 
-    def _blank_frame(self) -> np.ndarray:
-        return np.zeros((self.height, self.width, 3), dtype=np.uint8)
-
     def start(self) -> None:
         if self._running:
             return
@@ -133,7 +157,6 @@ class MotionTracker:
                     self._status_label = "WEBCAM LIVE"
                     self._consecutive_failures = 0
                     self._prev_gray = None
-                    self._bg_float = None
                     return
             if cap is not None:
                 cap.release()
@@ -144,7 +167,6 @@ class MotionTracker:
         self._is_simulation = True
         self._status_label = "NO CAMERA (SIM)"
         self._prev_gray = None
-        self._bg_float = None
 
     def _release_camera(self) -> None:
         if self._cap is not None:
@@ -158,7 +180,6 @@ class MotionTracker:
         with self._lock:
             self._force_simulation = enabled
             self._prev_gray = None
-            self._bg_float = None
             self._motion_score = 0.0
             if enabled:
                 self._release_camera()
@@ -197,7 +218,6 @@ class MotionTracker:
     def _detect_human_pose(
         self,
         gray: np.ndarray,
-        blurred: np.ndarray,
         delta: Optional[np.ndarray],
         is_sim: bool,
         lane_override: Optional[int],
@@ -214,46 +234,40 @@ class MotionTracker:
             face_found = False
             if self._face_cascade is not None:
                 try:
-                    faces = self._face_cascade.detectMultiScale(
+                    cv2.resize(
                         gray,
-                        scaleFactor=1.14,
+                        (self.width // 2, self.height // 2),
+                        dst=self._small_gray,
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                    faces = self._face_cascade.detectMultiScale(
+                        self._small_gray,
+                        scaleFactor=1.18,
                         minNeighbors=3,
-                        minSize=(22, 22),
+                        minSize=(14, 14),
                     )
                     if len(faces) > 0:
                         fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-                        target_x = float(fx + fw * 0.5) / float(self.width)
-                        target_y = float(fy + fh * 0.44) / float(self.height)
+                        target_x = float((fx + fw * 0.5) * 2.0) / float(self.width)
+                        target_y = float((fy + fh * 0.44) * 2.0) / float(self.height)
                         detected = True
                         face_found = True
                 except Exception:
                     pass
 
-            # Combine frame delta and adaptive background silhouette for reliable full-body tracking
-            if self._bg_float is None or self._bg_float.shape != blurred.shape:
-                self._bg_float = blurred.astype(np.float32)
-            else:
-                cv2.accumulateWeighted(blurred, self._bg_float, 0.025)
-
             if delta is not None:
-                _, motion_mask = cv2.threshold(delta, 16, 255, cv2.THRESH_BINARY)
-                ys, xs = np.nonzero(motion_mask)
-                if len(ys) > 30:
-                    # Use median X so a single waving hand doesn't pull the lane center away from the torso
-                    motion_x = float(np.median(xs)) / float(self.width)
-                    top_crown_y = float(np.percentile(ys, 16)) / float(self.height)
-                    bottom_y = float(np.percentile(ys, 84)) / float(self.height)
-                    median_y = float(np.median(ys)) / float(self.height)
-
-                    upper_zone_cutoff = int(self.height * 0.38)
-                    lower_zone_start = int(self.height * 0.62)
+                cv2.threshold(delta, 16, 255, cv2.THRESH_BINARY, dst=self._mask_buf)
+                count, motion_x, top_crown_y, median_y, bottom_y = _fast_mask_stats(self._mask_buf)
+                if count >= 30:
+                    upper_cut = int(self.height * 0.38)
+                    lower_cut = int(self.height * 0.62)
                     upper_active_pct = (
-                        float(np.count_nonzero(motion_mask[:upper_zone_cutoff, :]))
-                        / float(max(1, upper_zone_cutoff * self.width))
+                        float(np.count_nonzero(self._mask_buf[:upper_cut, :]))
+                        / float(max(1, upper_cut * self.width))
                     ) * 100.0
                     lower_active_pct = (
-                        float(np.count_nonzero(motion_mask[lower_zone_start:, :]))
-                        / float(max(1, (self.height - lower_zone_start) * self.width))
+                        float(np.count_nonzero(self._mask_buf[lower_cut:, :]))
+                        / float(max(1, (self.height - lower_cut) * self.width))
                     ) * 100.0
 
                     if not face_found:
@@ -303,14 +317,12 @@ class MotionTracker:
             vx = target_x - self._prev_raw_x
             self._prev_raw_x = target_x
             self._prev_raw_y = target_y
-            # Fast horizontal tracking so side-steps respond right away
             self._smoothed_x = self._smoothed_x * 0.34 + target_x * 0.66
             if target_y < self._smoothed_y:
                 self._smoothed_y = self._smoothed_y * 0.16 + target_y * 0.84
             else:
                 self._smoothed_y = self._smoothed_y * 0.28 + target_y * 0.72
 
-        # Horizontal lane classification with deadzone hysteresis so lanes don't flicker
         if lane_override is not None:
             lane = lane_override
         else:
@@ -409,27 +421,35 @@ class MotionTracker:
         lane_override: Optional[int],
         posture_override: Optional[PostureType],
     ) -> tuple[float, np.ndarray, float, float, int, PostureType]:
-        resized = cv2.resize(frame_bgr, (self.width, self.height))
-        if not is_sim:
-            resized = cv2.flip(resized, 1)
+        if frame_bgr.shape[1] != self.width or frame_bgr.shape[0] != self.height:
+            resized = cv2.resize(frame_bgr, (self.width, self.height))
+        else:
+            resized = frame_bgr.copy()
 
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, CV_BLUR_KERNEL, 0)
+        if not is_sim:
+            cv2.flip(resized, 1, dst=resized)
+
+        cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY, dst=self._gray_buf)
+        cv2.GaussianBlur(self._gray_buf, CV_BLUR_KERNEL, 0, dst=self._blur_buf)
 
         score = 0.0
         delta: Optional[np.ndarray] = None
-        if self._prev_gray is not None and self._prev_gray.shape == blurred.shape:
-            delta = cv2.absdiff(self._prev_gray, blurred)
-            _, thresh = cv2.threshold(delta, 20, 255, cv2.THRESH_BINARY)
-            changed_pct = (float(np.count_nonzero(thresh)) / float(thresh.size)) * 100.0
-            mean_delta = float(np.mean(delta))
+        if self._prev_gray is not None and self._prev_gray.shape == self._blur_buf.shape:
+            cv2.absdiff(self._prev_gray, self._blur_buf, dst=self._delta_buf)
+            delta = self._delta_buf
+            cv2.threshold(delta, 20, 255, cv2.THRESH_BINARY, dst=self._mask_buf)
+            changed_pct = (float(np.count_nonzero(self._mask_buf)) / float(self._mask_buf.size)) * 100.0
+            mean_delta = float(delta.mean())
             raw_score = min(100.0, (changed_pct * 1.4) + (mean_delta * 0.6))
             score = raw_score if is_sim else (self._motion_score * 0.25 + raw_score * 0.75)
 
-        self._prev_gray = blurred
+        if self._prev_gray is None:
+            self._prev_gray = self._blur_buf.copy()
+        else:
+            np.copyto(self._prev_gray, self._blur_buf)
 
         bx, by, lane, posture = self._detect_human_pose(
-            gray, blurred, delta, is_sim, lane_override, posture_override
+            self._gray_buf, delta, is_sim, lane_override, posture_override
         )
         self._draw_pose_hud_on_frame(resized, bx, by, lane, posture)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -441,13 +461,9 @@ class MotionTracker:
         lane_override: Optional[int] = None,
         posture_override: Optional[PostureType] = None,
     ) -> np.ndarray:
-        frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        frame[:, :] = (10, 14, 12)
-
-        for x in range(0, self.width, 32):
-            cv2.line(frame, (x, 0), (x, self.height), (22, 34, 28), 1)
-        for y in range(0, self.height, 32):
-            cv2.line(frame, (0, y), (self.width, y), (22, 34, 28), 1)
+        frame = np.full((self.height, self.width, 3), (10, 14, 12), dtype=np.uint8)
+        frame[:, ::32] = (22, 34, 28)
+        frame[::32, :] = (22, 34, 28)
 
         cx = self.width // 2
         if lane_override is not None:
@@ -492,6 +508,7 @@ class MotionTracker:
         return score, rgb
 
     def _capture_loop(self) -> None:
+        target_period = 1.0 / 30.0
         while self._running:
             loop_start = time.perf_counter()
             frame_bgr: Optional[np.ndarray] = None
@@ -520,7 +537,6 @@ class MotionTracker:
                         self._is_simulation = True
                         self._status_label = "CAMERA LOST (SIM)"
                         self._prev_gray = None
-                        self._bg_float = None
                     sim_mode = True
                     frame_bgr = self._generate_sim_frame(sim_motion, lane_ovr, posture_ovr)
             else:
@@ -539,14 +555,14 @@ class MotionTracker:
                     self._human_posture = posture
 
             elapsed = time.perf_counter() - loop_start
-            sleep_time = max(0.005, (1.0 / 30.0) - elapsed)
-            time.sleep(sleep_time)
+            if elapsed < target_period:
+                time.sleep(max(0.002, target_period - elapsed))
 
     def get_sample(self) -> MotionSample:
         with self._lock:
             return MotionSample(
                 motion_score=self._motion_score,
-                frame_rgb=self._latest_rgb.copy(),
+                frame_rgb=self._latest_rgb,
                 is_simulation=self._is_simulation,
                 status_label=self._status_label,
                 sim_motion_active=self._sim_motion_trigger,
