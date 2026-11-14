@@ -1,5 +1,3 @@
-"""Main entry point for LASER_PAW_PATROL — Cat 3D POV + 2D Mini-Window CV Stealth Runner."""
-
 from __future__ import annotations
 
 import sys
@@ -13,6 +11,7 @@ from config import (
     APP_TITLE,
     DEFAULT_HEIGHT,
     DEFAULT_WIDTH,
+    MAX_LEVEL,
     MIN_HEIGHT,
     MIN_WIDTH,
     TARGET_FPS,
@@ -21,6 +20,19 @@ from config import (
 from cv_tracker import MotionTracker, PostureType
 from game_state import GameState, Phase
 from ui_renderer import UIRenderer
+
+LEVEL_KEY_MAP = {
+    pygame.K_1: 1,
+    pygame.K_2: 2,
+    pygame.K_3: 3,
+    pygame.K_4: 4,
+    pygame.K_5: 5,
+    pygame.K_6: 6,
+    pygame.K_7: 7,
+    pygame.K_8: 8,
+    pygame.K_9: 9,
+    pygame.K_0: 10,
+}
 
 
 def _sync_settings(backend: BackendService, cfg: GameConfig) -> None:
@@ -108,16 +120,26 @@ def main() -> int:
                             kb_lane = None
                             state.start_heist()
 
-                    # Jump (Human Jump or W / UP / SPACE)
+                    elif event.key in LEVEL_KEY_MAP:
+                        chosen = LEVEL_KEY_MAP[event.key]
+                        state.select_starting_level(chosen)
+                        if state.phase not in (Phase.MENU, Phase.BUSTED, Phase.VICTORY):
+                            kb_lane = None
+                            state.start_heist(start_level=chosen)
+
+                    elif event.key == pygame.K_MINUS:
+                        state.select_starting_level(state.config.starting_level - 1)
+
+                    elif event.key == pygame.K_EQUALS:
+                        state.select_starting_level(min(MAX_LEVEL, state.config.starting_level + 1))
+
                     elif event.key in (pygame.K_w, pygame.K_UP, pygame.K_SPACE):
                         if state.phase != Phase.FREEZE:
                             state.trigger_jump()
 
-                    # Crouch & Roll under obstacles (Human Crouch or S / DOWN)
                     elif event.key in (pygame.K_s, pygame.K_DOWN):
                         state.trigger_crouch_roll()
 
-                    # Side move Left / Right (Human side-step or A/D / Left/Right)
                     elif event.key in (pygame.K_a, pygame.K_LEFT):
                         state.shift_lane(-1)
                         kb_lane = state.target_lane
@@ -126,20 +148,14 @@ def main() -> int:
                         state.shift_lane(1)
                         kb_lane = state.target_lane
 
-                    # Calibrate neutral webcam standing height
                     elif event.key == pygame.K_c:
                         tracker.calibrate_neutral()
-                        state.action_banner = "CAMERA NEUTRAL POSTURE CALIBRATED!"
+                        state.action_banner = "CAMERA NEUTRAL POSTURE CALIBRATED"
                         state.action_banner_timer = 1.5
 
                     elif event.key == pygame.K_m:
                         cfg.simulation_mode = not cfg.simulation_mode
                         tracker.set_simulation_mode(cfg.simulation_mode)
-                        _sync_settings(backend, cfg)
-
-                    elif event.key == pygame.K_a and (pygame.key.get_mods() & pygame.KMOD_CTRL):
-                        cfg.audio_enabled = not cfg.audio_enabled
-                        audio.enabled = cfg.audio_enabled
                         _sync_settings(backend, cfg)
 
                     elif event.key == pygame.K_LEFTBRACKET:
@@ -153,7 +169,6 @@ def main() -> int:
             keys = pygame.key.get_pressed()
             tracker.set_simulated_motion(bool(keys[pygame.K_SPACE]))
 
-            # Sync held keyboard posture with CV tracker for visual feedback in CCTV box
             posture_ovr: Optional[PostureType] = None
             if keys[pygame.K_w] or keys[pygame.K_UP] or (keys[pygame.K_SPACE] and state.phase != Phase.FREEZE):
                 posture_ovr = "JUMP"
@@ -162,7 +177,6 @@ def main() -> int:
             tracker.set_pose_overrides(kb_lane, posture_ovr)
 
             cv_sample = tracker.get_sample()
-            # In live webcam mode (when no keyboard lane lock is set), human movement directly steers the cat
             active_lane = kb_lane if (kb_lane is not None and cv_sample.is_simulation) else cv_sample.human_lane
             state.update(
                 dt,

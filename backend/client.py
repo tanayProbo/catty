@@ -1,5 +1,3 @@
-"""Embedded backend launcher and non-blocking client for the Pygame loop."""
-
 from __future__ import annotations
 
 import json
@@ -19,8 +17,6 @@ from config import BACKEND_HOST, BACKEND_PORT, DB_FILENAME
 
 
 class BackendService:
-    """Runs the FastAPI server in a background thread and provides non-blocking access."""
-
     def __init__(
         self,
         host: str = BACKEND_HOST,
@@ -45,9 +41,7 @@ class BackendService:
         self.settings: SettingsPayload = self.db.get_settings()
 
     def start(self) -> None:
-        """Start the embedded FastAPI/Uvicorn server if the port is available."""
         if self._is_port_open():
-            # Another backend instance may already be running; verify health
             self.api_online = self._ping_health()
             self.refresh_async()
             return
@@ -78,7 +72,6 @@ class BackendService:
             self.api_online = False
 
     def stop(self) -> None:
-        """Gracefully signal Uvicorn to exit."""
         if self._server is not None:
             self._server.should_exit = True
 
@@ -113,7 +106,6 @@ class BackendService:
             return None
 
     def refresh_async(self, limit: int = 8) -> None:
-        """Fetch leaderboard and stats in a background thread."""
         threading.Thread(
             target=self._refresh_worker,
             args=(limit,),
@@ -138,7 +130,6 @@ class BackendService:
             self.stats = stats
 
     def submit_run_async(self, payload: RunCreate) -> None:
-        """Persist a completed heist run without blocking the game loop."""
         threading.Thread(
             target=self._submit_run_worker,
             args=(payload,),
@@ -152,7 +143,6 @@ class BackendService:
         self._refresh_worker(limit=8)
 
     def save_settings_async(self, payload: SettingsPayload) -> None:
-        """Persist updated settings without blocking the game loop."""
         with self._lock:
             self.settings = payload
         threading.Thread(
@@ -167,6 +157,5 @@ class BackendService:
             self.db.update_settings(payload)
 
     def get_snapshot(self) -> tuple[list[RunRecord], StatsSummary, bool]:
-        """Thread-safe snapshot for the UI renderer."""
         with self._lock:
             return list(self.leaderboard), self.stats, self.api_online

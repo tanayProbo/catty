@@ -1,5 +1,3 @@
-"""Automated test suite for LASER_PAW_PATROL (Cat 3D POV, 2D PiP Window, Human Pose CV, and Backend)."""
-
 from __future__ import annotations
 
 import os
@@ -13,15 +11,13 @@ from audio_engine import AudioEngine
 from backend.database import DatabaseManager
 from backend.models import RunCreate, SettingsPayload, TelemetryEventIn
 from backend.server import create_app
-from config import GameConfig
+from config import MAX_LEVEL, GameConfig
 from cv_tracker import MotionTracker
 from game_state import CorridorObstacle, GameState, Phase
 from ui_renderer import UIRenderer
 
 
 class TestLaserPawPatrol(unittest.TestCase):
-    """End-to-end unit and integration tests for LASER_PAW_PATROL."""
-
     def test_database_and_fastapi_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test_heist.db")
@@ -93,7 +89,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertLessEqual(score_still, 2.0)
         self.assertEqual(rgb.shape, (tracker.height, tracker.width, 3))
 
-        # Test human jump/crouch/lane pose overrides
         tracker.set_pose_overrides(lane=-1, posture="CROUCH")
         crouch_frame = tracker._generate_sim_frame(motion_active=False, lane_override=-1, posture_override="CROUCH")
         tracker._compute_motion(crouch_frame)
@@ -101,7 +96,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertEqual(sample.human_lane, -1)
         self.assertEqual(sample.human_posture, "CROUCH")
 
-        # Test real CV upward motion impulse jump detection (no override)
         tracker.set_pose_overrides(lane=None, posture=None)
         base_frame = tracker._generate_sim_frame(motion_active=False)
         tracker._compute_motion_and_pose(base_frame, is_sim=False, lane_override=None, posture_override=None)
@@ -120,26 +114,42 @@ class TestLaserPawPatrol(unittest.TestCase):
             CorridorObstacle(kind="SIDE_BLOCK", distance_m=6.0, lane=0),
         ]
 
-        # 1. Human crouches -> Cat rolls under HIGH_GATE at 1.0m
         state.distance_meters = 0.95
         state.update(0.05, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="CROUCH")
         self.assertTrue(state.is_rolling)
         self.assertTrue(state.obstacles[0].cleared)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
-        # 2. Human jumps -> Cat jumps over LOW_BEAM at 3.5m
         state.distance_meters = 3.45
         state.update(0.05, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="JUMP")
         self.assertGreater(state.cat_jump_height, 0.0)
         self.assertTrue(state.obstacles[1].cleared)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
-        # 3. Human moves right (lane +1) -> Cat dodges center SIDE_BLOCK at 6.0m
         state.distance_meters = 5.90
         for _ in range(5):
             state.update(0.04, motion_score=0.0, is_simulation=True, human_lane=1, human_posture="STAND")
         self.assertTrue(state.obstacles[2].cleared)
         self.assertNotEqual(state.phase, Phase.BUSTED)
+
+    def test_ten_level_progression_to_victory(self) -> None:
+        state = GameState()
+        state.start_heist(start_level=1)
+        self.assertEqual(state.level, 1)
+        self.assertEqual(MAX_LEVEL, 10)
+
+        for expected_lvl in range(1, MAX_LEVEL):
+            self.assertEqual(state.level, expected_lvl)
+            state.distance_meters = state.goal_meters
+            state.update(0.05, motion_score=0.0, is_simulation=True)
+            self.assertEqual(state.level, expected_lvl + 1)
+            self.assertEqual(state.phase, Phase.CREEPING)
+
+        # Completing level 10 triggers VICTORY
+        self.assertEqual(state.level, 10)
+        state.distance_meters = state.goal_meters
+        state.update(0.05, motion_score=0.0, is_simulation=True)
+        self.assertEqual(state.phase, Phase.VICTORY)
 
     def test_game_state_freeze_pass_and_busted(self) -> None:
         cfg = GameConfig(motion_threshold=14.0, freeze_duration=2.6)
@@ -179,6 +189,7 @@ class TestLaserPawPatrol(unittest.TestCase):
             audio = AudioEngine(enabled=True)
             audio.play("jump")
             audio.play("roll")
+            audio.play("level_up")
 
             tracker = MotionTracker(force_simulation=True)
             sample = tracker.get_sample()
