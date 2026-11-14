@@ -109,6 +109,8 @@ class GameState:
     cat_strength: float = 1.0
     blood_flash_timer: float = 0.0
     crash_invuln_timer: float = 0.0
+    reincarnating_timer: float = 0.0
+    reincarnation_count: int = 0
     blood_particles: list[BloodParticle] = field(default_factory=list)
     blood_stains: list[BloodStain] = field(default_factory=list)
 
@@ -260,6 +262,8 @@ class GameState:
         self.cat_strength = 1.0
         self.blood_flash_timer = 0.0
         self.crash_invuln_timer = 0.0
+        self.reincarnating_timer = 0.0
+        self.reincarnation_count = 0
         self.blood_particles.clear()
         self.blood_stains.clear()
 
@@ -420,6 +424,8 @@ class GameState:
             self.blood_flash_timer = max(0.0, self.blood_flash_timer - dt)
         if self.crash_invuln_timer > 0.0:
             self.crash_invuln_timer = max(0.0, self.crash_invuln_timer - dt)
+        if self.reincarnating_timer > 0.0:
+            self.reincarnating_timer = max(0.0, self.reincarnating_timer - dt)
         if self.blood_particles:
             for bp in self.blood_particles:
                 bp.timer -= dt
@@ -548,7 +554,13 @@ class GameState:
         if self.phase == Phase.CREEPING:
             base_speed = spec.roll_speed_mps if self.is_rolling else spec.walk_speed_mps
             speed = base_speed * (0.58 + 0.42 * self.cat_strength)
+            if self.reincarnating_timer > 0.75:
+                speed *= 0.12
+            elif self.reincarnating_timer > 0.0:
+                speed *= 0.55
             self._advance_cat(dt, speed)
+            if self.reincarnating_timer > 0.75:
+                self.cat_bounce_height = 0.0
             self._spawn_obstacles_ahead()
             self._check_coins()
             if human_lane is not None or human_posture is not None:
@@ -584,7 +596,14 @@ class GameState:
 
         elif self.phase == Phase.CLEAR:
             base_clear_spd = max(FREEZE_CLEAR_BONUS_MPS, spec.walk_speed_mps + 2.2)
-            self._advance_cat(dt, base_clear_spd * (0.58 + 0.42 * self.cat_strength))
+            clear_speed = base_clear_spd * (0.58 + 0.42 * self.cat_strength)
+            if self.reincarnating_timer > 0.75:
+                clear_speed *= 0.12
+            elif self.reincarnating_timer > 0.0:
+                clear_speed *= 0.55
+            self._advance_cat(dt, clear_speed)
+            if self.reincarnating_timer > 0.75:
+                self.cat_bounce_height = 0.0
             self._spawn_obstacles_ahead()
             self._check_coins()
             if human_lane is not None or human_posture is not None:
@@ -773,21 +792,27 @@ class GameState:
         self.cat_strength = max(0.20, round(1.0 - self.deaths_count * 0.088, 3))
         self.streak = 0
         self.crash_invuln_timer = 0.85
+        self.obstacles = [
+            o for o in self.obstacles
+            if not (0.0 <= (o.distance_m - self.distance_meters) <= 1.2)
+        ]
 
         if self.lives_remaining <= 0 or fatal_if_no_gesture:
             self._trigger_busted(motion_score, is_simulation)
         else:
+            self.reincarnating_timer = 1.45
+            self.reincarnation_count += 1
             self.flash_timer = 0.65
             self._emit_sound("alarm")
             self._record_telemetry("MOTION_DETECTED", motion_score)
             strength_pct = int(round(self.cat_strength * 100))
             self.action_banner = (
-                f"CRASH! -1 LIFE ({self.lives_remaining}/{self.max_lives} LEFT) // "
-                f"CAT WEAKENED TO {strength_pct}%"
+                f"DIED! REINCARNATING ({self.lives_remaining}/{self.max_lives} LIVES LEFT // "
+                f"{strength_pct}% POWER)"
             )
             self.action_banner_timer = 2.2
             self._add_popup(
-                f"BLOOD! {self.lives_remaining}/{self.max_lives} LIVES ({strength_pct}%)",
+                f"REINCARNATED! ({self.lives_remaining}/9 LIVES)",
                 lane=self.target_lane,
                 is_gold=False,
             )

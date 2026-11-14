@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LASER PAW PATROL - Egyptian Museum Heist</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0b0c10;
+    color: #fff;
+    font-family: "Courier New", Courier, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  #wrap {
+    position: relative;
+    width: 1280px;
+    height: 720px;
+    max-width: 100vw;
+    max-height: 100vh;
+    border: 3px solid #ffd447;
+    box-shadow: 0 0 30px rgba(255, 212, 71, 0.25);
+    background: #0e1015;
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  video { display: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="1280" height="720"></canvas>
+  <video id="cam" autoplay playsinline muted></video>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const W = 1280, H = 720;
+  const CORRIDOR_W = W - 310;
+
+  // Load sprites
+  const SPRITE_NAMES = [
+    "ankh", "burglar_cat", "desert_ground", "desert_sky",
+    "floor_tile_1", "floor_tile_2", "golden_lamp", "mummy_sarcophagus",
+    "pharaoh_mask", "pillar", "pyramid", "ruby", "temple_archway", "tomb_shrine"
+  ];
+  const sprites = {};
+  for (const name of SPRITE_NAMES) {
+    const img = new Image();
+    img.src = `assets/${name}.png`;
+    sprites[name] = img;
+  }
+
+  // Minimal Web Audio synth
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  let actx = null;
+  function beep(freq, dur, type = "square", vol = 0.08) {
+    try {
+      if (!actx) actx = new AudioCtx();
+      if (actx.state === "suspended") actx.resume();
+      const o = actx.createOscillator();
+      const g = actx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, actx.currentTime);
+      g.gain.setValueAtTime(vol, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+      o.connect(g); g.connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + dur);
+    } catch (_) {}
+  }
+
+  // Webcam + Pure JS 5-Box CV Tracker (no AI)
+  const video = document.getElementById("cam");
+  const cvCanvas = document.createElement("canvas");
+  cvCanvas.width = 160; cvCanvas.height = 120;
+  const cvCtx = cvCanvas.getContext("2d", { willReadFrequently: true });
+  let prevGray = null;
+
+  const cv = {
+    live: false,
+    status: "CAM: KEYBOARD / SIM",
+    motionScore: 0,
+    x: 0.5, y: 0.5,
+    lane: 0, posture: "STAND",
+    detected: false
+  };
+
+  const JUMP_Y = 0.28, CROUCH_Y = 0.72, LEFT_X = 0.32, RIGHT_X = 0.68;
+
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: "user" } })
+      .then(stream => {
+        video.srcObject = stream;
+        cv.live = true;
+        cv.status = "CAM 01 - LIVE";
+      })
+      .catch(() => { cv.status = "SIM MODE (WASD)"; });
+  }
+
+  function processCV() {
+    if (!cv.live || video.readyState < 2) return;
+    cvCtx.save();
+    cvCtx.scale(-1, 1);
+    cvCtx.drawImage(video, -160, 0, 160, 120);
+    cvCtx.restore();
+
+    const img = cvCtx.getImageData(0, 0, 160, 120);
+    const d = img.data;
+    const gray = new Uint8Array(160 * 120);
+    let motionCount = 0;
+    let sumX = 0, sumY = 0, pts = 0;
+
+    for (let y = 0; y < 120; y++) {
+      for (let x = 0; x < 160; x++) {
+        const i = (y * 160 + x) * 4;
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const gr = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+        const idx = y * 160 + x;
+        gray[idx] = gr;
+
+        let isMotion = false;
+        if (prevGray) {
+          if (Math.abs(gr - prevGray[idx]) > 18) {
+            isMotion = true;
+            motionCount++;
+          }
+        }
+        const isSkin = (r > 95 && g > 40 && b > 20 && (r - g) > 15 && r > b);
+        if (isMotion || isSkin) {
+          sumX += x / 160;
+          sumY += y / 120;
+          pts++;
+        }
+      }
+    }
+    prevGray = gray;
+    cv.motionScore = Math.min(100, (motionCount / (160 * 120)) * 260);
+
+    if (pts >= 25) {
+      const tx = sumX / pts;
+      const ty = sumY / pts;
+      cv.x = cv.x * 0.60 + tx * 0.40;
+      cv.y = cv.y * 0.60 + ty * 0.40;
+      cv.detected = true;
+
+      if (cv.y < JUMP_Y) cv.posture = "JUMP";
+      else if (cv.y > CROUCH_Y) cv.posture = "CROUCH";
+      else cv.posture = "STAND";
+
+      if (cv.x < LEFT_X) cv.lane = -1;
+      else if (cv.x > RIGHT_X) cv.lane = 1;
+      else cv.lane = 0;
+    } else {
+      cv.detected = false;
+    }
+  }
+
+  // Keyboard fallback
+  const keys = {};
+  window.addEventListener("keydown", e => {
+    keys[e.code] = true;
+    if (e.code === "Enter" || e.code === "Space") {
+      if (state.phase === "MENU" || state.phase === "BUSTED" || state.phase === "VICTORY") {
+        startHeist();
+      }
+    }
+  });
+  window.addEventListener("keyup", e => { keys[e.code] = false; });
+
+  // Game State
+  const state = {
+    phase: "MENU",
+    level: 1,
+    score: 0,
+    coins: 0,
+    dist: 0,
+    goal: 90,
+    lives: 9,
+    maxLives: 9,
+    deaths: 0,
+    strength: 1.0,
+    elapsed: 0,
+    walkCycle: 0,
+    lane: 0,
+    catLanePos: 0,
+    jumpTimer: 0,
+    jumpHeight: 0,
+    rollTimer: 0,
+    rollAngle: 0,
+    isRolling: false,
+    bounceHeight: 0,
+    bounceMult: 1.0,
+    reincarnateTimer: 0,
+    bloodFlash: 0,
+    invulnTimer: 0,
+    nextSweep: 7.0,
+    phaseTimer: 0,
+    laserOffset: 0,
+    obstacles: [],
+    coinsList: [],
+    popups: [],
+    bloodStains: [],
+    nextObsDist: 10,
+    banner: "",
+    bannerTimer: 0
+  };
+
+  function startHeist(lvl = 1) {
+    state.phase = "CREEPING";
+    state.level = lvl;
+    if (lvl === 1) {
+      state.score = 0; state.coins = 0;
+      state.lives = 9; state.deaths = 0; state.strength = 1.0;
+      state.bloodStains = [];
+    }
+    state.dist = 0;
+    state.goal = 85 + (lvl - 1) * 15;
+    state.elapsed = 0;
+    state.lane = 0; state.catLanePos = 0;
+    state.jumpTimer = 0; state.jumpHeight = 0;
+    state.rollTimer = 0; state.isRolling = false;
+    state.reincarnateTimer = 0; state.bloodFlash = 0; state.invulnTimer = 0;
+    state.nextSweep = 6.5;
+    state.obstacles = []; state.coinsList = []; state.popups = [];
+    state.nextObsDist = 11;
+    state.banner = `LEVEL ${lvl} - STEAL THE RELIC!`;
+    state.bannerTimer = 2.0;
+    beep(520, 0.12, "triangle");
+  }
+
+  function addPopup(txt, lane, gold = true) {
+    state.popups.push({ txt, lane, gold, t: 1.0 });
+    if (state.popups.length > 4) state.popups.shift();
+  }
+
+  function spawnAhead() {
+    while (state.nextObsDist < state.dist + 34 && state.nextObsDist < state.goal - 5) {
+      const kinds = ["HIGH_GATE", "LOW_BEAM", "SIDE_BLOCK"];
+      const kind = kinds[Math.floor(Math.random() * kinds.length)];
+      const lane = Math.floor(Math.random() * 3) - 1;
+      state.obstacles.push({ kind, d: state.nextObsDist, lane, cleared: false });
+      state.coinsList.push({
+        d: state.nextObsDist,
+        lane: kind === "SIDE_BLOCK" ? (lane === 0 ? 1 : 0) : lane,
+        tier: kind === "LOW_BEAM" ? "AIR" : (kind === "HIGH_GATE" ? "LOW_ROLL" : "FLOOR"),
+        got: false
+      });
+      state.nextObsDist += 6.5 + Math.random() * 3.5;
+    }
+  }
+
+  function registerCrash() {
+    state.deaths++;
+    state.lives = Math.max(0, state.maxLives - state.deaths);
+    state.strength = Math.max(0.2, 1.0 - state.deaths * 0.088);
+    state.bloodFlash = 0.7;
+    state.invulnTimer = 1.5;
+    state.obstacles = state.obstacles.filter(o => !(o.d - state.dist >= -0.2 && o.d - state.dist <= 1.5));
+    for (let i = 0; i < 4; i++) {
+      state.bloodStains.push({
+        x: 0.25 + Math.random() * 0.5,
+        y: 0.55 + Math.random() * 0.35,
+        r: 6 + Math.random() * 12
+      });
+    }
+    if (state.bloodStains.length > 24) state.bloodStains = state.bloodStains.slice(-24);
+    beep(140, 0.25, "sawtooth", 0.12);
+
+    if (state.lives <= 0) {
+      state.phase = "BUSTED";
+    } else {
+      state.reincarnateTimer = 1.45;
+      state.banner = `DIED! REINCARNATING (${state.lives}/9 LIVES)`;
+      state.bannerTimer = 2.0;
+      addPopup(`REINCARNATED! ${state.lives}/9`, state.lane, false);
+    }
+  }
+
+  function update(dt) {
+    if (state.bloodFlash > 0) state.bloodFlash = Math.max(0, state.bloodFlash - dt);
+    if (state.invulnTimer > 0) state.invulnTimer = Math.max(0, state.invulnTimer - dt);
+    if (state.reincarnateTimer > 0) state.reincarnateTimer = Math.max(0, state.reincarnateTimer - dt);
+    if (state.bannerTimer > 0) state.bannerTimer = Math.max(0, state.bannerTimer - dt);
+    state.popups.forEach(p => p.t -= dt);
+    state.popups = state.popups.filter(p => p.t > 0);
+
+    // Input merge (CV + Keyboard)
+    let wantLane = cv.detected ? cv.lane : 0;
+    let wantPosture = cv.detected ? cv.posture : "STAND";
+    if (keys["KeyA"] || keys["ArrowLeft"]) wantLane = -1;
+    if (keys["KeyD"] || keys["ArrowRight"]) wantLane = 1;
+    if (keys["KeyW"] || keys["ArrowUp"]) wantPosture = "JUMP";
+    if (keys["KeyS"] || keys["ArrowDown"]) wantPosture = "CROUCH";
+
+    if (state.phase === "MENU" || state.phase === "BUSTED" || state.phase === "VICTORY") return;
+
+    state.elapsed += dt;
+    const tier = Math.min(5, Math.floor(state.elapsed / 10));
+    state.bounceMult = 1.0 + tier * 0.22;
+    state.laserOffset = (state.laserOffset + dt * 1.4) % 1;
+    state.lane = wantLane;
+    state.catLanePos += (state.lane - state.catLanePos) * Math.min(1, dt * 12);
+
+    if (wantPosture === "JUMP" && state.jumpTimer <= 0) {
+      state.jumpTimer = 0.65; state.rollTimer = 0; state.isRolling = false;
+      beep(420, 0.08, "triangle");
+    } else if (wantPosture === "CROUCH") {
+      state.rollTimer = 0.45; state.isRolling = true;
+      state.jumpTimer = 0; state.jumpHeight = 0;
+    }
+
+    if (state.jumpTimer > 0) {
+      state.jumpTimer = Math.max(0, state.jumpTimer - dt);
+      const p = 1 - state.jumpTimer / 0.65;
+      state.jumpHeight = Math.sin(p * Math.PI) * (1 + (state.bounceMult - 1) * 0.4);
+    } else {
+      state.jumpHeight = 0;
+    }
+
+    if (state.rollTimer > 0) {
+      state.rollTimer = Math.max(0, state.rollTimer - dt);
+      state.isRolling = true;
+      state.rollAngle = (state.rollAngle + dt * 720) % 360;
+    } else {
+      state.isRolling = false;
+    }
+
+    // Phase timers
+    if (state.phase === "CREEPING") {
+      let spd = (state.isRolling ? 7.2 : 5.4) * (0.58 + 0.42 * state.strength);
+      if (state.reincarnateTimer > 0.75) spd *= 0.12;
+      else if (state.reincarnateTimer > 0) spd *= 0.55;
+      state.dist += spd * dt;
+      state.walkCycle += dt * 10;
+      state.bounceHeight = Math.abs(Math.sin(state.walkCycle)) * state.bounceMult;
+      state.score += Math.floor(spd * dt * 10);
+
+      state.nextSweep -= dt;
+      if (state.nextSweep <= 0) {
+        state.phase = "WARNING";
+        state.phaseTimer = 1.2;
+        beep(660, 0.15, "square", 0.06);
+      }
+    } else if (state.phase === "WARNING") {
+      state.dist += 3.0 * dt;
+      state.phaseTimer -= dt;
+      if (state.phaseTimer <= 0) {
+        state.phase = "FREEZE";
+        state.phaseTimer = 2.0;
+        beep(880, 0.2, "sawtooth", 0.08);
+      }
+    } else if (state.phase === "FREEZE") {
+      state.phaseTimer -= dt;
+      if (cv.motionScore > 18) {
+        registerCrash();
+        if (state.phase !== "BUSTED") {
+          state.phase = "CREEPING";
+          state.nextSweep = 6.5;
+        }
+      } else if (state.phaseTimer <= 0) {
+        state.phase = "CLEAR";
+        state.phaseTimer = 1.5;
+        state.score += 250;
+        addPopup("SWEEP CLEAR +250", state.lane, true);
+        beep(740, 0.15, "triangle");
+      }
+    } else if (state.phase === "CLEAR") {
+      state.dist += 7.0 * dt;
+      state.phaseTimer -= dt;
+      if (state.phaseTimer <= 0) {
+        state.phase = "CREEPING";
+        state.nextSweep = 6.5;
+      }
+    }
+
+    spawnAhead();
+
+    // Collisions
+    for (const c of state.coinsList) {
+      if (!c.got && Math.abs(c.d - state.dist) < 0.8 && Math.abs(c.lane - state.catLanePos) < 0.65) {
+        c.got = true;
+        state.coins++;
+        state.score += 100;
+        addPopup("+100 RELIC", c.lane, true);
+        beep(920, 0.06, "sine");
+      }
+    }
+
+    if (state.invulnTimer <= 0 && state.reincarnateTimer <= 0) {
+      for (const o of state.obstacles) {
+        if (o.cleared) continue;
+        const rel = o.d - state.dist;
+        if (rel <= 0.15 && rel >= -0.3) {
+          let hit = false;
+          if (o.kind === "HIGH_GATE" && !state.isRolling) hit = true;
+          if (o.kind === "LOW_BEAM" && state.jumpHeight < 0.25) hit = true;
+          if (o.kind === "SIDE_BLOCK" && Math.abs(o.lane - state.catLanePos) < 0.55) hit = true;
+          if (hit) {
+            o.cleared = true;
+            registerCrash();
+            break;
+          } else {
+            o.cleared = true;
+            state.score += 50;
+          }
+        }
+      }
+    }
+
+    if (state.dist >= state.goal) {
+      if (state.level >= 10) state.phase = "VICTORY";
+      else startHeist(state.level + 1);
+    }
+  }
+
+  function project(laneX, hY, z, vx, vy, camH) {
+    const sz = Math.max(0.35, z);
+    const scale = 2.6 / (sz + 2.2);
+    const sx = vx + (laneX - state.catLanePos * 0.85) * (CORRIDOR_W * 0.34) * scale;
+    const sy = vy + ((0.52 - hY) * H * 0.72 + camH * 0.85) * scale;
+    return [sx, sy, scale];
+  }
+
+  function draw() {
+    ctx.fillStyle = "#0e1015";
+    ctx.fillRect(0, 0, W, H);
+
+    const camH = (state.phase !== "FREEZE" ? state.bounceHeight * 18 : 0) + state.jumpHeight * 135 - (state.isRolling ? 56 : 0);
+    const vx = CORRIDOR_W * 0.5 - state.catLanePos * (W * 0.09);
+    const vy = Math.max(90, Math.min(H - 120, H * 0.41 + camH * 0.52));
+
+    // Sky & Pyramids
+    if (sprites.desert_sky.complete) ctx.drawImage(sprites.desert_sky, 0, 0, CORRIDOR_W, vy + 18);
+    else { ctx.fillStyle = "#2b4263"; ctx.fillRect(0, 0, CORRIDOR_W, vy); }
+
+    const pShift = (state.dist * 6) % 420;
+    if (sprites.pyramid.complete) {
+      for (let px = -pShift; px < CORRIDOR_W + 200; px += 260) {
+        ctx.drawImage(sprites.pyramid, px, vy - 110, 180, 120);
+      }
+    }
+
+    // Ground
+    if (sprites.desert_ground.complete) ctx.drawImage(sprites.desert_ground, 0, vy, CORRIDOR_W, H - vy);
+    else { ctx.fillStyle = "#c2a162"; ctx.fillRect(0, vy, CORRIDOR_W, H - vy); }
+
+    // 3-lane causeway
+    const [flx, fly] = project(-1.5, 0, 36, vx, vy, camH);
+    const [frx, fry] = project(1.5, 0, 36, vx, vy, camH);
+    const [nlx, nly] = project(-1.5, 0, 0.38, vx, vy, camH);
+    const [nrx, nry] = project(1.5, 0, 0.38, vx, vy, camH);
+    ctx.fillStyle = state.phase === "FREEZE" ? "#6e2a28" : "#9c7c44";
+    ctx.beginPath();
+    ctx.moveTo(flx, fly); ctx.lineTo(frx, fry); ctx.lineTo(nrx, nry); ctx.lineTo(nlx, nly);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "#ffd447"; ctx.lineWidth = 3; ctx.stroke();
+
+    // Goal
+    const rem = Math.max(1.2, state.goal - state.dist);
+    if (rem < 45) {
+      const [gx, gy, gs] = project(0, 0.28, rem, vx, vy, camH);
+      if (sprites.temple_archway.complete) ctx.drawImage(sprites.temple_archway, gx - 110 * gs, gy - 95 * gs, 220 * gs, 190 * gs);
+      const relic = sprites[state.level % 3 === 1 ? "ruby" : (state.level % 3 === 2 ? "ankh" : "golden_lamp")];
+      if (relic.complete) ctx.drawImage(relic, gx - 55 * gs, gy - 55 * gs, 110 * gs, 110 * gs);
+    }
+
+    // Coins & Obstacles
+    for (const c of state.coinsList) {
+      if (c.got) continue;
+      const z = c.d - state.dist;
+      if (z >= -0.2 && z <= 32) {
+        const hy = c.tier === "AIR" ? 0.56 : (c.tier === "LOW_ROLL" ? 0.14 : 0.22);
+        const [cx, cy, cs] = project(c.lane, hy, z, vx, vy, camH);
+        const r = Math.max(6, 36 * cs);
+        if (sprites.ankh.complete) ctx.drawImage(sprites.ankh, cx - r, cy - r, r * 2, r * 2);
+      }
+    }
+
+    for (const o of state.obstacles) {
+      if (o.cleared) continue;
+      const z = o.d - state.dist;
+      if (z >= -0.4 && z <= 34) {
+        if (o.kind === "HIGH_GATE") {
+          const [x0, y0] = project(-1.5, 1.0, z, vx, vy, camH);
+          const [x1, y1] = project(1.5, 0.36, z, vx, vy, camH);
+          ctx.fillStyle = "rgba(65,18,22,0.85)";
+          ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+          ctx.strokeStyle = state.isRolling ? "#00e5ff" : "#ff3b3b";
+          ctx.lineWidth = 3; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        } else if (o.kind === "LOW_BEAM") {
+          const [x0, y0] = project(-1.5, 0.34, z, vx, vy, camH);
+          const [x1, y1] = project(1.5, 0.0, z, vx, vy, camH);
+          ctx.fillStyle = "rgba(180,35,35,0.85)";
+          ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+          ctx.strokeStyle = "#ffb830"; ctx.lineWidth = 3; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        } else {
+          const [x0, y0] = project(o.lane - 0.45, 0.85, z, vx, vy, camH);
+          const [x1, y1] = project(o.lane + 0.45, 0.0, z, vx, vy, camH);
+          if (sprites.pharaoh_mask.complete) ctx.drawImage(sprites.pharaoh_mask, x0, y0, x1 - x0, y1 - y0);
+          ctx.strokeStyle = "#ff3b3b"; ctx.lineWidth = 3; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        }
+      }
+    }
+
+    // Blood stains
+    for (const b of state.bloodStains) {
+      ctx.fillStyle = "rgba(185, 16, 26, 0.75)";
+      ctx.beginPath(); ctx.arc(b.x * CORRIDOR_W, b.y * H, b.r, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Cat Foreground (Dying / Reincarnating / Active)
+    const catX = CORRIDOR_W * 0.5 + state.catLanePos * 85;
+    const catW = 104, catH = 128;
+    const catY = H - 42 - catH - state.bounceHeight * 20 - state.jumpHeight * 118;
+
+    if (state.reincarnateTimer > 0.75) {
+      ctx.strokeStyle = "#ff3b3b"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.ellipse(catX, H - 46, 56, 16, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.save(); ctx.translate(catX, H - 58); ctx.rotate(Math.PI / 2);
+      if (sprites.burglar_cat.complete) ctx.drawImage(sprites.burglar_cat, -catW / 2, -catH / 2, catW, catH);
+      ctx.restore();
+    } else {
+      if (state.reincarnateTimer > 0) {
+        ctx.fillStyle = "rgba(255, 215, 64, 0.35)";
+        ctx.fillRect(catX - 55, 0, 110, H - 38);
+        if (sprites.ankh.complete) ctx.drawImage(sprites.ankh, catX - 22, Math.max(24, catY - 52), 44, 44);
+      }
+      if (state.isRolling) {
+        ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(catX, H - 105, 58, 0, Math.PI * 2); ctx.stroke();
+      }
+      if (sprites.burglar_cat.complete) ctx.drawImage(sprites.burglar_cat, catX - catW / 2, catY, catW, catH);
+    }
+
+    // Popups
+    ctx.font = "bold 16px Courier New"; ctx.textAlign = "center";
+    state.popups.slice(-2).forEach((p, idx) => {
+      ctx.fillStyle = p.gold ? "#ffd447" : "#00e5ff";
+      ctx.fillText(p.txt, CORRIDOR_W / 2 + p.lane * 135, H * 0.4 - (1 - p.t) * 55 - idx * 24);
+    });
+
+    // Blood flash
+    if (state.bloodFlash > 0) {
+      ctx.fillStyle = `rgba(210, 18, 28, ${0.4 * state.bloodFlash})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Minimal Top HUD
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#0e1015"; ctx.fillRect(16, 14, CORRIDOR_W - 10, 54);
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.strokeRect(16, 14, CORRIDOR_W - 10, 54);
+    ctx.fillStyle = "#ffd447"; ctx.font = "bold 12px Courier New";
+    ctx.fillText(`LVL ${state.level}/10`, 28, 30);
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 20px Courier New";
+    ctx.fillText(String(state.score).padStart(5, "0"), 28, 54);
+
+    ctx.fillStyle = state.lives <= 3 ? "#ff3b3b" : "#38e54d";
+    ctx.font = "bold 12px Courier New";
+    ctx.fillText(`LIVES ${state.lives}/9`, 145, 30);
+    for (let i = 0; i < 9; i++) {
+      ctx.fillStyle = i < state.lives ? "#ff3b3b" : "#2d2d32";
+      ctx.fillRect(145 + i * 13, 38, 10, 14);
+    }
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(`${state.dist.toFixed(0)}M / ${state.goal}M`, 285, 30);
+    ctx.fillStyle = "#222"; ctx.fillRect(285, 38, 340, 14);
+    ctx.fillStyle = "#ffd447"; ctx.fillRect(285, 38, 340 * Math.min(1, state.dist / state.goal), 14);
+
+    // Right Sidebar: CAM 01 + 5-Box Cyber HUD
+    const sx = W - 298;
+    ctx.fillStyle = "#0e1015"; ctx.fillRect(sx, 14, 282, 228);
+    ctx.strokeStyle = state.phase === "FREEZE" ? "#ff3b3b" : "#ffffff";
+    ctx.strokeRect(sx, 14, 282, 228);
+
+    if (cv.live && video.readyState >= 2) {
+      ctx.save();
+      ctx.translate(sx + 278, 18); ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, 274, 176);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = "#151820"; ctx.fillRect(sx + 4, 18, 274, 176);
+    }
+
+    // 5-Box Overlay + Reticle
+    const jY = 18 + 176 * JUMP_Y, cY = 18 + 176 * CROUCH_Y;
+    const lX = sx + 4 + 274 * LEFT_X, rX = sx + 4 + 274 * RIGHT_X;
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.55)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(sx + 4, jY); ctx.lineTo(sx + 278, jY);
+    ctx.moveTo(sx + 4, cY); ctx.lineTo(sx + 278, cY);
+    ctx.moveTo(lX, jY); ctx.lineTo(lX, cY);
+    ctx.moveTo(rX, jY); ctx.lineTo(rX, cY);
+    ctx.stroke();
+
+    const rx = sx + 4 + cv.x * 274, ry = 18 + cv.y * 176;
+    ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(rx, ry, 10, 0, Math.PI * 2); ctx.stroke();
+
+    ctx.fillStyle = "#0e1015"; ctx.fillRect(sx + 8, 22, 145, 18);
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 11px Courier New";
+    ctx.fillText(cv.status, sx + 14, 35);
+    ctx.fillStyle = cv.motionScore > 18 ? "#ff3b3b" : "#38e54d";
+    ctx.fillText(`MOTION: ${cv.motionScore.toFixed(0)}`, sx + 12, 214);
+    ctx.fillStyle = "#222"; ctx.fillRect(sx + 12, 222, 258, 10);
+    ctx.fillStyle = cv.motionScore > 18 ? "#ff3b3b" : "#38e54d";
+    ctx.fillRect(sx + 12, 222, 258 * Math.min(1, cv.motionScore / 40), 10);
+
+    // Phase Banner
+    if (state.phase === "WARNING" || state.phase === "FREEZE") {
+      ctx.fillStyle = "#0e1015"; ctx.fillRect(CORRIDOR_W / 2 - 210, 88, 420, 56);
+      ctx.strokeStyle = state.phase === "FREEZE" ? "#ff3b3b" : "#ffb830";
+      ctx.strokeRect(CORRIDOR_W / 2 - 210, 88, 420, 56);
+      ctx.fillStyle = ctx.strokeStyle; ctx.font = "bold 18px Courier New"; ctx.textAlign = "center";
+      ctx.fillText(state.phase === "FREEZE" ? `FREEZE! ${state.phaseTimer.toFixed(1)}s` : "LASER SWEEP INCOMING!", CORRIDOR_W / 2, 122);
+    }
+
+    // Overlays
+    if (state.phase === "MENU" || state.phase === "BUSTED" || state.phase === "VICTORY") {
+      ctx.fillStyle = "rgba(10, 12, 16, 0.82)";
+      ctx.fillRect(CORRIDOR_W / 2 - 260, H / 2 - 110, 520, 220);
+      ctx.strokeStyle = state.phase === "BUSTED" ? "#ff3b3b" : "#ffd447";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(CORRIDOR_W / 2 - 260, H / 2 - 110, 520, 220);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ffd447"; ctx.font = "bold 28px Courier New";
+      const title = state.phase === "MENU" ? "LASER PAW PATROL" : (state.phase === "VICTORY" ? "HEIST COMPLETE!" : "BUSTED!");
+      ctx.fillText(title, CORRIDOR_W / 2, H / 2 - 45);
+      ctx.fillStyle = "#ffffff"; ctx.font = "15px Courier New";
+      ctx.fillText("WEBCAM 5-BOX CV  |  KEYBOARD: W/S/A/D", CORRIDOR_W / 2, H / 2);
+      ctx.fillStyle = "#38e54d"; ctx.font = "bold 18px Courier New";
+      ctx.fillText("PRESS ENTER OR SPACE TO START", CORRIDOR_W / 2, H / 2 + 55);
+    }
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    processCV();
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
+
