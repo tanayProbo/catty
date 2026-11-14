@@ -1,5 +1,3 @@
-"""Pydantic data models for the LASER_PAW_PATROL backend API."""
-
 from typing import Literal
 from pydantic import BaseModel, Field
 

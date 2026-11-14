@@ -1,8 +1,6 @@
-"""Thread-safe SQLite database manager for LASER_PAW_PATROL."""
-
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 import os
 import sqlite3
 import threading
@@ -20,8 +18,6 @@ from backend.models import (
 
 
 class DatabaseManager:
-    """Manages SQLite persistence for heist runs, CV telemetry, and settings."""
-
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         db_dir = os.path.dirname(os.path.abspath(db_path))

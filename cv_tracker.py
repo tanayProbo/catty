@@ -1,5 +1,3 @@
-"""Real-time OpenCV motion & human pose tracker (High-Sensitivity Jump, Crouch/Roll, Left/Right)."""
-
 from __future__ import annotations
 
 import os
@@ -32,15 +30,13 @@ class MotionSample:
     is_simulation: bool
     status_label: str
     sim_motion_active: bool
-    human_lane: int = 0                 # -1 = LEFT, 0 = CENTER, +1 = RIGHT
-    human_posture: PostureType = "STAND"  # "STAND", "JUMP", "CROUCH"
-    body_x: float = 0.5                 # Normalized 0..1 horizontal center
-    body_y: float = 0.5                 # Normalized 0..1 vertical center
+    human_lane: int = 0
+    human_posture: PostureType = "STAND"
+    body_x: float = 0.5
+    body_y: float = 0.5
 
 
 class MotionTracker:
-    """Thread-safe OpenCV frame-differencing & multi-signal human jump/crouch/side-move tracker."""
-
     def __init__(
         self,
         camera_index: int = CV_CAMERA_INDEX,
@@ -55,7 +51,7 @@ class MotionTracker:
 
         self._cap: Optional[cv2.VideoCapture] = None
         self._is_simulation = force_simulation
-        self._status_label = "INITIALIZING"
+        self._status_label = "STARTING"
         self._prev_gray: Optional[np.ndarray] = None
         self._latest_rgb: np.ndarray = self._blank_frame()
         self._motion_score: float = 0.0
@@ -63,7 +59,6 @@ class MotionTracker:
         self._sim_phase: float = 0.0
         self._consecutive_failures: int = 0
 
-        # Human pose & multi-signal jump tracking state
         self._face_cascade = self._load_face_cascade()
         self._smoothed_x: float = 0.5
         self._smoothed_y: float = 0.50
@@ -74,7 +69,6 @@ class MotionTracker:
         self._jump_hold_until: float = 0.0
         self._crouch_suppress_until: float = 0.0
 
-        # Keyboard / simulation pose input
         self._sim_lane_override: Optional[int] = None
         self._sim_posture_override: Optional[PostureType] = None
 
@@ -105,7 +99,7 @@ class MotionTracker:
             self._open_camera()
         else:
             self._is_simulation = True
-            self._status_label = "SIMULATION MODE"
+            self._status_label = "SIMULATION"
 
         self._running = True
         self._thread = threading.Thread(
@@ -132,7 +126,7 @@ class MotionTracker:
                 if ret and frame is not None and frame.size > 0:
                     self._cap = cap
                     self._is_simulation = False
-                    self._status_label = "CAM_00 POSE+CV"
+                    self._status_label = "WEBCAM LIVE"
                     self._consecutive_failures = 0
                     self._prev_gray = None
                     return
@@ -143,7 +137,7 @@ class MotionTracker:
 
         self._cap = None
         self._is_simulation = True
-        self._status_label = "SIMULATION (NO CAM)"
+        self._status_label = "NO CAMERA (SIM)"
         self._prev_gray = None
 
     def _release_camera(self) -> None:
@@ -155,7 +149,6 @@ class MotionTracker:
             self._cap = None
 
     def set_simulation_mode(self, enabled: bool) -> None:
-        """Toggle between live webcam and mock simulation mode."""
         with self._lock:
             self._force_simulation = enabled
             self._prev_gray = None
@@ -163,12 +156,11 @@ class MotionTracker:
             if enabled:
                 self._release_camera()
                 self._is_simulation = True
-                self._status_label = "SIMULATION MODE"
+                self._status_label = "SIMULATION"
             else:
                 self._open_camera()
 
     def set_simulated_motion(self, active: bool) -> None:
-        """Used in simulation mode (holding SPACE) to inject frame delta."""
         with self._lock:
             self._sim_motion_trigger = active
 
@@ -177,19 +169,16 @@ class MotionTracker:
         lane: Optional[int],
         posture: Optional[PostureType],
     ) -> None:
-        """Allow keyboard controls (W/A/S/D or Arrows) to drive or assist human pose."""
         with self._lock:
             self._sim_lane_override = lane
             self._sim_posture_override = posture
 
     def calibrate_neutral(self) -> None:
-        """Calibrate current tracked Y position as the player's neutral standing height."""
         with self._lock:
             self._neutral_y = max(0.32, min(0.68, self._smoothed_y))
             self._jump_hold_until = 0.0
 
     def reset_reference(self) -> None:
-        """Reset previous frame baseline before a new freeze window."""
         with self._lock:
             self._prev_gray = None
             self._motion_score = 0.0
@@ -202,7 +191,6 @@ class MotionTracker:
         lane_override: Optional[int],
         posture_override: Optional[PostureType],
     ) -> tuple[float, float, int, PostureType]:
-        """Multi-signal human pose detector (Face + Top-Motion Crown + Upward Impulse Velocity)."""
         now = time.perf_counter()
         target_x = self._smoothed_x
         target_y = self._smoothed_y
@@ -211,7 +199,6 @@ class MotionTracker:
 
         if not is_sim:
             face_found = False
-            # 1. Primary: Permissive Haar cascade face/head tracking
             if self._face_cascade is not None:
                 try:
                     faces = self._face_cascade.detectMultiScale(
@@ -229,17 +216,14 @@ class MotionTracker:
                 except Exception:
                     pass
 
-            # 2. Motion Crown & Upward Impulse Detector (catches fast jumps even when face blurs!)
             if delta is not None:
                 _, mask = cv2.threshold(delta, 18, 255, cv2.THRESH_BINARY)
                 ys, xs = np.nonzero(mask)
                 if len(ys) > 35:
                     motion_x = float(np.mean(xs)) / float(self.width)
-                    # Track top 18th percentile of moving pixels (head/shoulders crown)
                     top_crown_y = float(np.percentile(ys, 18)) / float(self.height)
                     bottom_y = float(np.percentile(ys, 85)) / float(self.height)
 
-                    # Check upper-frame burst (head/arms shooting into upper 38% of frame)
                     upper_zone_cutoff = int(self.height * 0.38)
                     upper_active_pct = (
                         float(np.count_nonzero(mask[:upper_zone_cutoff, :]))
@@ -248,24 +232,20 @@ class MotionTracker:
 
                     if not face_found:
                         target_x = motion_x
-                        # If motion is concentrated low in the frame, track lower body; otherwise track upper crown
                         if bottom_y > 0.72 and top_crown_y > 0.48:
                             target_y = float(np.mean(ys)) / float(self.height)
                         else:
                             target_y = min(self._smoothed_y, top_crown_y + 0.06)
                         detected = True
                     else:
-                        # Even if face was found, if the motion crown jumped higher, use the higher point
                         target_y = min(target_y, top_crown_y + 0.05)
 
-                    # Detect rapid upward velocity or strong upper-frame jump burst
                     vy = target_y - self._prev_raw_y
                     if (vy < -0.032 and top_crown_y < self._neutral_y - 0.04) or (
                         upper_active_pct > 4.2 and top_crown_y < self._neutral_y - 0.05
                     ):
                         upward_impulse_jump = True
 
-        # Apply keyboard / simulation overrides when active
         if lane_override is not None:
             target_x = 0.20 if lane_override < 0 else (0.80 if lane_override > 0 else 0.50)
             detected = True
@@ -287,13 +267,11 @@ class MotionTracker:
         if detected or is_sim:
             self._prev_raw_y = target_y
             self._smoothed_x = self._smoothed_x * 0.50 + target_x * 0.50
-            # Fast asymmetric smoothing: react almost instantly (82%) when moving UP for a jump!
             if target_y < self._smoothed_y:
                 self._smoothed_y = self._smoothed_y * 0.18 + target_y * 0.82
             else:
                 self._smoothed_y = self._smoothed_y * 0.45 + target_y * 0.55
 
-        # Classify horizontal lane (-1 = LEFT, 0 = CENTER, +1 = RIGHT)
         if lane_override is not None:
             lane = lane_override
         elif self._smoothed_x < CV_LEFT_X_THRESHOLD:
@@ -303,7 +281,6 @@ class MotionTracker:
         else:
             lane = 0
 
-        # Dynamic jump & crouch thresholds relative to neutral baseline
         jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.075))
         crouch_thresh = min(0.82, max(CV_CROUCH_Y_THRESHOLD, self._neutral_y + 0.105))
 
@@ -322,7 +299,6 @@ class MotionTracker:
             posture = "CROUCH"
         else:
             posture = "STAND"
-            # Gently adapt neutral baseline toward standing head height when player is steady
             if not is_sim and detected and abs(self._smoothed_y - self._neutral_y) < 0.06:
                 self._neutral_y = self._neutral_y * 0.98 + self._smoothed_y * 0.02
 
@@ -336,7 +312,6 @@ class MotionTracker:
         lane: int,
         posture: PostureType,
     ) -> None:
-        """Overlay dynamic jump/crouch thresholds, lane dividers, and human tracking reticle."""
         w, h = self.width, self.height
         jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.075))
         crouch_thresh = min(0.82, max(CV_CROUCH_Y_THRESHOLD, self._neutral_y + 0.105))
@@ -346,17 +321,14 @@ class MotionTracker:
         left_x = int(w * CV_LEFT_X_THRESHOLD)
         right_x = int(w * CV_RIGHT_X_THRESHOLD)
 
-        # Zone lines
         cv2.line(frame_bgr, (0, jump_y), (w, jump_y), (0, 220, 255), 2 if posture == "JUMP" else 1)
         cv2.line(frame_bgr, (0, crouch_y), (w, crouch_y), (255, 200, 0), 2 if posture == "CROUCH" else 1)
         cv2.line(frame_bgr, (left_x, 0), (left_x, h), (70, 90, 80), 1)
         cv2.line(frame_bgr, (right_x, 0), (right_x, h), (70, 90, 80), 1)
 
-        # Zone labels
-        cv2.putText(frame_bgr, "JUMP LINE ^", (8, max(12, jump_y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 230, 255), 1)
-        cv2.putText(frame_bgr, "CROUCH/ROLL v", (8, min(h - 6, crouch_y + 13)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 210, 0), 1)
+        cv2.putText(frame_bgr, "JUMP", (8, max(12, jump_y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 230, 255), 1)
+        cv2.putText(frame_bgr, "CROUCH", (8, min(h - 6, crouch_y + 13)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 210, 0), 1)
 
-        # Tracked human reticle
         px, py = int(bx * w), int(by * h)
         ret_color = (0, 255, 102)
         if posture == "JUMP":
@@ -369,8 +341,8 @@ class MotionTracker:
         cv2.line(frame_bgr, (px, py - 22), (px, py + 22), ret_color, 1)
 
         lane_str = "LEFT" if lane < 0 else ("RIGHT" if lane > 0 else "CENTER")
-        tag = f"{lane_str} // {posture}"
-        cv2.putText(frame_bgr, tag, (w - 138, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.40, ret_color, 1)
+        tag = f"{lane_str} / {posture}"
+        cv2.putText(frame_bgr, tag, (w - 132, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.40, ret_color, 1)
 
     def _compute_motion_and_pose(
         self,
@@ -379,7 +351,6 @@ class MotionTracker:
         lane_override: Optional[int],
         posture_override: Optional[PostureType],
     ) -> tuple[float, np.ndarray, float, float, int, PostureType]:
-        """Run OpenCV absdiff motion detection + human pose tracking."""
         resized = cv2.resize(frame_bgr, (self.width, self.height))
         if not is_sim:
             resized = cv2.flip(resized, 1)
@@ -411,7 +382,6 @@ class MotionTracker:
         lane_override: Optional[int] = None,
         posture_override: Optional[PostureType] = None,
     ) -> np.ndarray:
-        """Generate a synthetic CCTV frame showing the simulated human jumping/crouching/moving."""
         frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         frame[:, :] = (10, 14, 12)
 
@@ -443,8 +413,8 @@ class MotionTracker:
 
         cv2.putText(
             frame,
-            "POSE: W/S=JUMP/ROLL A/D=LANE",
-            (8, self.height - 10),
+            "W/S: JUMP/ROLL  A/D: LANE",
+            (10, self.height - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.38,
             (120, 240, 160),
@@ -489,7 +459,7 @@ class MotionTracker:
                     with self._lock:
                         self._release_camera()
                         self._is_simulation = True
-                        self._status_label = "SIMULATION (CAM LOST)"
+                        self._status_label = "CAMERA LOST (SIM)"
                         self._prev_gray = None
                     sim_mode = True
                     frame_bgr = self._generate_sim_frame(sim_motion, lane_ovr, posture_ovr)
@@ -513,7 +483,6 @@ class MotionTracker:
             time.sleep(sleep_time)
 
     def get_sample(self) -> MotionSample:
-        """Return the latest thread-safe CV & human pose sample."""
         with self._lock:
             return MotionSample(
                 motion_score=self._motion_score,

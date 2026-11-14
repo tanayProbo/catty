@@ -1,5 +1,3 @@
-"""Procedural sound synthesizer using NumPy and Pygame mixer."""
-
 from __future__ import annotations
 
 from typing import Optional
@@ -8,8 +6,6 @@ import pygame
 
 
 class AudioEngine:
-    """Synthesizes cyberpunk klaxons, alarms, jump/roll FX, and chimes with zero external assets."""
-
     SAMPLE_RATE = 22050
 
     def __init__(self, enabled: bool = True) -> None:
@@ -46,7 +42,7 @@ class AudioEngine:
     def _build_sounds(self) -> None:
         sr = self.SAMPLE_RATE
 
-        # 1. Warning Klaxon (dual-pulse sawtooth/square sweep)
+        # Warning klaxon before freeze sweep
         dur = 0.42
         t = np.linspace(0, dur, int(sr * dur), endpoint=False, dtype=np.float32)
         freq = 540.0 + 260.0 * np.sin(2.0 * np.pi * 6.0 * t)
@@ -57,7 +53,7 @@ class AudioEngine:
         if snd:
             self._sounds["klaxon"] = snd
 
-        # 2. Busted Alarm Siren (urgent descending/ascending security siren)
+        # Alarm when caught
         dur_a = 0.85
         ta = np.linspace(0, dur_a, int(sr * dur_a), endpoint=False, dtype=np.float32)
         freq_a = 720.0 + 380.0 * np.sign(np.sin(2.0 * np.pi * 5.0 * ta))
@@ -68,7 +64,7 @@ class AudioEngine:
         if snd:
             self._sounds["alarm"] = snd
 
-        # 3. Freeze Clear Chime (ascending matrix green triad)
+        # Clear chime after surviving freeze
         notes = [523.25, 659.25, 783.99]
         parts = []
         for f in notes:
@@ -79,7 +75,18 @@ class AudioEngine:
         if snd:
             self._sounds["clear"] = snd
 
-        # 4. Victory Fanfare
+        # Level advancement chime
+        lvl_notes = [587.33, 739.99, 880.0]
+        lvl_parts = []
+        for f in lvl_notes:
+            tl = np.linspace(0, 0.11, int(sr * 0.11), endpoint=False, dtype=np.float32)
+            w = np.sin(2.0 * np.pi * f * tl) * 0.75 + np.sign(np.sin(2.0 * np.pi * f * tl)) * 0.25
+            lvl_parts.append(w * self._envelope(len(tl), 0.05, 0.35))
+        snd = self._to_sound(np.concatenate(lvl_parts), volume=0.30)
+        if snd:
+            self._sounds["level_up"] = snd
+
+        # Final victory fanfare
         v_notes = [523.25, 659.25, 783.99, 1046.5]
         v_parts = []
         for idx, f in enumerate(v_notes):
@@ -91,14 +98,14 @@ class AudioEngine:
         if snd:
             self._sounds["victory"] = snd
 
-        # 5. Subtle Bouncy Paw Step
+        # Soft paw step
         ts = np.linspace(0, 0.045, int(sr * 0.045), endpoint=False, dtype=np.float32)
         step_w = np.sin(2.0 * np.pi * 195.0 * ts) * self._envelope(len(ts), 0.08, 0.7)
         snd = self._to_sound(step_w, volume=0.10)
         if snd:
             self._sounds["step"] = snd
 
-        # 6. Cat Jump Spring (ascending frequency sweep)
+        # Jump sound
         tj = np.linspace(0, 0.18, int(sr * 0.18), endpoint=False, dtype=np.float32)
         f_jump = np.linspace(260.0, 680.0, len(tj), dtype=np.float32)
         p_jump = np.cumsum(2.0 * np.pi * f_jump / sr)
@@ -107,7 +114,7 @@ class AudioEngine:
         if snd:
             self._sounds["jump"] = snd
 
-        # 7. Cat Crouch-Roll Whoosh (descending synth + filtered noise spin)
+        # Crouch roll whoosh
         tr = np.linspace(0, 0.22, int(sr * 0.22), endpoint=False, dtype=np.float32)
         f_roll = np.linspace(480.0, 140.0, len(tr), dtype=np.float32)
         p_roll = np.cumsum(2.0 * np.pi * f_roll / sr)
@@ -116,7 +123,7 @@ class AudioEngine:
         if snd:
             self._sounds["roll"] = snd
 
-        # 8. Obstacle Dodge / Roll-Under Bonus Blip
+        # Obstacle cleared blip
         td = np.linspace(0, 0.09, int(sr * 0.09), endpoint=False, dtype=np.float32)
         w_dodge = np.sin(2.0 * np.pi * 880.0 * td) * self._envelope(len(td), 0.05, 0.5)
         snd = self._to_sound(w_dodge, volume=0.22)

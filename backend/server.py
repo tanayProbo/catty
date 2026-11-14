@@ -1,5 +1,3 @@
-"""FastAPI REST backend for LASER_PAW_PATROL."""
-
 from __future__ import annotations
 
 import os
@@ -18,7 +16,6 @@ from config import DB_FILENAME
 
 
 def create_app(db_path: str | None = None) -> FastAPI:
-    """Build and configure the FastAPI application."""
     resolved_db = db_path or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         DB_FILENAME,
@@ -26,9 +23,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
     db = DatabaseManager(resolved_db)
 
     app = FastAPI(
-        title="LASER_PAW_PATROL Backend API",
+        title="Laser Paw Patrol API",
         version="1.0.0",
-        description="Persistence, telemetry, and leaderboard API for LASER_PAW_PATROL.",
     )
     app.state.db = db
 

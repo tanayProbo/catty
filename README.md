@@ -1,50 +1,42 @@
-# LASER_PAW_PATROL // Cat 3D POV & 2D Mini-Window Stealth Runner
+# Laser Paw Patrol
 
-**LASER_PAW_PATROL** is a high-performance Python computer vision arcade stealth runner built with **Pygame-ce**, **OpenCV (`cv2`)**, **NumPy**, and an embedded **FastAPI + SQLite** leaderboard/telemetry backend.
+Laser Paw Patrol is an arcade stealth game built with Pygame and OpenCV where you play as a cat sneaking through a ten-level security vault to steal a golden fish bowl.
 
----
+## How It Works
 
-## Key Gameplay & CV Highlights
+The main screen renders a first-person cat perspective looking down a three-lane corridor. As the cat runs forward, the camera bounces along with its steps while showing its front paws, whiskers, and ears around the edges of the screen. Alongside the main view, a smaller window on the right side of the screen runs a live 2D side-scrolling version of the same hallway so you can see your position relative to upcoming obstacles from the side.
 
-- **Bouncing First-Person Cat POV (Main Viewport)**:
-  - Run down a 3-lane cyberpunk security vault from the **Cat's First-Person POV** complete with bouncing front paws, twitching whiskers, cat-ear night-vision visor HUD, and perspective 3D obstacles rushing toward you.
-  - **Crouch-Roll Under Obstacles**: When you crouch (or press `S`/`DOWN`), the Cat POV camera drops low to the floor with a 360° cyber barrel-roll spin as the cat rolls underneath overhead laser gates!
-  - **Jump Over Floor Tripwires**: When you jump (or press `W`/`UP`), the Cat leaps high over floor laser beams.
-  - **3-Lane Side-Step**: Move left/center/right in front of the webcam (or press `A`/`D` / `LEFT`/`RIGHT`) to dodge lane security pylons.
-  - **Red Laser Sweep Freeze**: Periodically, full-corridor security lasers sweep across the screen — freeze completely still for 2.6 seconds so `cv2.absdiff` motion stays below threshold!
-- **Synchronized 2D Side-View Environment Mini-Window (`2D ENV // SIDE-VIEW TRACKER`)**:
-  - A live Picture-in-Picture window on the right side of the screen renders the 2D side-scrolling environment in real time: watch the chubby 2D cat bounce forward, leap over low beams, curl into a spinning ball rolling underneath high gates, and race toward the golden fish bowl.
-- **Real-Time Webcam Human Pose + Motion Tracking (`cv_tracker.py`)**:
-  - Tracks human vertical posture (`JUMP ^` vs `CROUCH/ROLL v` vs `STAND`) and horizontal lane (`LEFT | CENTER | RIGHT`) alongside `cv2.absdiff` frame-delta motion detection, with automatic zero-crash fallback to Simulation Mode if no camera is attached.
+Above the 2D side window is a live webcam feed. OpenCV tracks your movement in real time. Jumping in front of your camera makes the cat leap over low floor lasers. Crouching down makes the cat tuck into a ball and roll underneath overhead laser gates. Stepping left or right moves the cat across the three lanes of the corridor to dodge security pylons.
 
----
+Every few seconds, an alarm sounds and a full laser grid sweeps across the room. When the sweep starts, you have to freeze in place until the scan finishes and the lasers turn green. If the frame difference from your webcam goes over the motion threshold while the red lasers are active, the guard dog catches you and the run ends. If no webcam is plugged in, the game switches to a built-in simulation mode so you can still play using the keyboard.
 
-## Quick Start
+## The Ten Levels
 
-```bash
-pip install -r requirements.txt
-python main.py
-```
+The game is split into ten progressively faster sectors:
 
-### Run Automated Tests
+1. Lobby Vents
+2. Service Corridor
+3. Server Hallway
+4. Cryo Storage
+5. Security Hub
+6. Biolab Tunnel
+7. Reactor Walkway
+8. Executive Floor
+9. Diamond Atrium
+10. The Golden Vault
 
-```bash
-python -m unittest discover -s tests -v
-```
+Each level increases the length of the hallway, speeds up the cat, shortens the gap between obstacles, and makes the red laser freeze sweeps last longer. You can start from Level 1 and work your way through all ten in a single run, or pick any starting level from the menu using the number keys.
 
----
+## Controls
 
-## Controls (Webcam Human Pose + Keyboard)
+Besides moving in front of your webcam, you can use the keyboard at any time:
 
-| Input / Action | Effect |
-| :--- | :--- |
-| **Human Jump** or **`W` / `UP`** | Cat Jumps over low floor laser beams |
-| **Human Crouch** or **`S` / `DOWN`** | Cat Crouches & Rolls underneath high laser gates |
-| **Human Move Left/Right** or **`A` / `D` / `LEFT` / `RIGHT`** | Shift Cat between Left, Center, and Right lanes |
-| **`C`** | Calibrate current webcam posture as neutral standing height |
-| **`ENTER` / `R`** | Start Heist / Quick Retry |
-| **`SPACE` (Hold)** | Simulate motion burst during Freeze in Simulation Mode |
-| **`M`** | Toggle Live Webcam (`CAM_00`) vs Simulation Mode |
-| **`[` / `]`** | Decrease / Increase CV Motion Threshold sensitivity |
-| **`TAB`** | Open / Close Live SQLite & FastAPI Leaderboard Modal |
-| **`ESC`** | Return to Menu / Quit |
+- Up Arrow, W, or Space makes the cat jump over floor lasers.
+- Down Arrow or S makes the cat crouch and roll under high laser gates.
+- Left and Right Arrows (or A and D) shift between the left, center, and right lanes.
+- Number keys 1 through 9 (and 0 for Level 10) or the Minus and Equals keys select which level to play.
+- C calibrates your current standing or sitting posture on the webcam.
+- M toggles between live webcam tracking and simulation mode.
+- Left and Right square brackets adjust the motion sensitivity threshold for the freeze sweeps.
+- Tab opens the local leaderboard and run stats stored in SQLite.
+- Enter or R starts a new run, and Escape returns to the menu.
