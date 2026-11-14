@@ -172,11 +172,10 @@ class UIRenderer:
                 self._flash_overlay.fill((210, 18, 28, alpha))
                 surface.blit(self._flash_overlay, (0, 0))
 
-        # Top HUD + Right Sidebar (CAM 01 + 2D Side View Window + Telemetry Card)
+        # Clean Minimal Right Sidebar (CCTV Cam + 2D Side View Window)
         self._draw_top_hud(surface, w, state, cv_sample, api_online)
         self._draw_cctv_feed(surface, w, state, cv_sample)
         self._draw_2d_pip_window(surface, w, h, state)
-        self._draw_sidebar_telemetry_card(surface, w, h, state, cv_sample)
         self._draw_phase_banner(surface, w, h, state, cv_sample)
 
         if state.phase == Phase.MENU:
@@ -404,15 +403,13 @@ class UIRenderer:
             if -0.4 <= depth <= 34.0:
                 self._draw_pov_obstacle(surface, obs, depth, vx, vy, corridor_w, h, cam_h, state)
 
-        hint = (
-            "2 HANDS UP: JUMP  |  2 HANDS DOWN: CROUCH  |  1 HAND L/R: STEER LANE  |  "
-            "1-0: LEVEL  |  C: CALIBRATE  |  TAB: SCORES"
-        )
-        hint_surf = self._txt(self.font_xs, hint, COLOR_WHITE)
-        hint_bg = pygame.Rect(16, h - 30, hint_surf.get_width() + 16, 22)
-        pygame.draw.rect(surface, COLOR_BG, hint_bg)
-        pygame.draw.rect(surface, COLOR_GOLD, hint_bg, 2)
-        surface.blit(hint_surf, (24, h - 26))
+        # Clean minimal footer cue
+        hint = "HANDS: 2 UP=JUMP | 2 DOWN=CROUCH | 1 L/R=LANE  [KEYS: W / S / A / D]"
+        hint_surf = self._txt(self.font_xs, hint, (190, 190, 190))
+        hint_bg = pygame.Rect(16, h - 26, hint_surf.get_width() + 16, 18)
+        pygame.draw.rect(surface, (12, 12, 14), hint_bg)
+        pygame.draw.rect(surface, (60, 60, 70), hint_bg, 1)
+        surface.blit(hint_surf, (24, h - 24))
 
     def _draw_pov_coin(
         self,
@@ -520,15 +517,16 @@ class UIRenderer:
             return
         corridor_w = max(560, w - 310)
         cx = corridor_w // 2
-        for idx, p in enumerate(state.popups):
+        # Limit visible popups to the most recent 2 to prevent cluttered visual chaos
+        for idx, p in enumerate(state.popups[-2:]):
             px = cx + p.lane * 135
-            rise = int((1.0 - p.timer) * 70)
-            py = int(h * 0.44) - rise - idx * 22
+            rise = int((1.0 - p.timer) * 55)
+            py = int(h * 0.40) - rise - idx * 24
             col = COLOR_GOLD if p.is_gold else COLOR_CYAN
-            lbl = self._txt(self.font_md, p.text, col)
+            lbl = self._txt(self.font_sm, p.text, col)
             bg_r = pygame.Rect(px - lbl.get_width() // 2 - 6, py - 2, lbl.get_width() + 12, lbl.get_height() + 4)
-            pygame.draw.rect(surface, COLOR_BG, bg_r)
-            pygame.draw.rect(surface, col, bg_r, 2)
+            pygame.draw.rect(surface, (15, 15, 18), bg_r)
+            pygame.draw.rect(surface, col, bg_r, 1)
             surface.blit(lbl, (px - lbl.get_width() // 2, py))
 
     def _draw_pov_lasers(
@@ -600,66 +598,117 @@ class UIRenderer:
         pygame.draw.ellipse(surface, (58, 44, 24), (cx - shadow_w // 2, h - 48, shadow_w, 14))
 
         cat_sprite = self._sprite("burglar_cat", cat_w, cat_h) or self._sprite("chubby_cat_sketch", cat_w, cat_h)
-        if state.is_rolling:
-            roll_rad = math.radians(state.cat_roll_angle)
-            ring_cy = h - 105
+        if state.reincarnating_timer > 0.75:
+            # DYING PHASE: Cat collapses 90 degrees onto crimson death ring
+            death_pulse = 1.0 + 0.12 * math.sin(state.reincarnating_timer * 24.0)
+            ring_rx = int(58 * death_pulse)
+            ring_ry = int(18 * death_pulse)
+            pygame.draw.ellipse(surface, (110, 10, 18), (cx - ring_rx, h - 56, ring_rx * 2, ring_ry * 2))
+            pygame.draw.ellipse(surface, COLOR_RED, (cx - ring_rx, h - 56, ring_rx * 2, ring_ry * 2), 3)
             if cat_sprite is not None:
-                rot = pygame.transform.rotate(cat_sprite, -state.cat_roll_angle * 0.35)
-                r_rect = rot.get_rect(center=(cx, ring_cy))
-                surface.blit(rot, r_rect.topleft)
-            pygame.draw.circle(surface, COLOR_CYAN, (cx, ring_cy), 64, 3)
-            for k in range(4):
-                a = roll_rad + k * (math.pi * 0.5)
-                x1 = cx + int(math.cos(a) * 46)
-                y1 = ring_cy + int(math.sin(a) * 46)
-                x2 = cx + int(math.cos(a) * 70)
-                y2 = ring_cy + int(math.sin(a) * 70)
-                pygame.draw.line(surface, COLOR_CYAN, (x1, y1), (x2, y2), 4)
-            roll_lbl = self._txt(self.font_sm, "CROUCH ROLL ACTIVE", COLOR_CYAN)
-            bg = pygame.Rect(cx - roll_lbl.get_width() // 2 - 6, h - 195, roll_lbl.get_width() + 12, 22)
+                fallen = pygame.transform.rotate(cat_sprite, 90)
+                f_rect = fallen.get_rect(center=(cx, h - 58))
+                surface.blit(fallen, f_rect.topleft)
+            dead_lbl = self._txt(self.font_sm, "CAT DIED! LOST 1 LIFE", COLOR_RED)
+            bg = pygame.Rect(cx - dead_lbl.get_width() // 2 - 8, h - 148, dead_lbl.get_width() + 16, 24)
             pygame.draw.rect(surface, COLOR_BG, bg)
-            pygame.draw.rect(surface, COLOR_CYAN, bg, 2)
-            surface.blit(roll_lbl, (cx - roll_lbl.get_width() // 2, h - 192))
+            pygame.draw.rect(surface, COLOR_RED, bg, 2)
+            surface.blit(dead_lbl, (cx - dead_lbl.get_width() // 2, h - 145))
         else:
-            if cat_sprite is not None:
-                # Slight limping tilt when weakened by deaths
-                if state.deaths_count > 0:
-                    limp_deg = math.sin(state.walk_cycle * 0.5) * min(12.0, state.deaths_count * 1.4)
-                    tilted = pygame.transform.rotate(cat_sprite, limp_deg)
-                    t_rect = tilted.get_rect(center=(cx, cat_y + cat_h // 2))
-                    surface.blit(tilted, t_rect.topleft)
-                else:
-                    surface.blit(cat_sprite, (cx - cat_w // 2, cat_y))
+            is_rebirth = 0.0 < state.reincarnating_timer <= 0.75
+            rebirth_prog = (0.75 - state.reincarnating_timer) / 0.75 if is_rebirth else 0.0
+            if is_rebirth:
+                # REINCARNATING PHASE: Descending Golden Ankh Reincarnation Beam + expanding rings
+                beam_w = 136
+                beam_surf = pygame.Surface((beam_w, max(20, h - 38)), pygame.SRCALPHA)
+                beam_alpha = int(115 * math.sin(max(0.05, rebirth_prog) * math.pi))
+                pygame.draw.rect(beam_surf, (255, 215, 64, beam_alpha), (0, 0, beam_w, beam_surf.get_height()))
+                pygame.draw.rect(
+                    beam_surf,
+                    (255, 248, 195, min(200, beam_alpha + 45)),
+                    (beam_w // 4, 0, beam_w // 2, beam_surf.get_height()),
+                )
+                surface.blit(beam_surf, (cx - beam_w // 2, 0))
+                ring_center = (cx, cat_y + cat_h // 2)
+                pygame.draw.circle(surface, COLOR_GOLD, ring_center, 38 + int(rebirth_prog * 44), 3)
+                pygame.draw.circle(surface, COLOR_CYAN, ring_center, 20 + int(rebirth_prog * 56), 2)
 
-                # Draw battle scars / blood spots / bandages proportional to deaths_count (1..9)
-                if state.deaths_count > 0:
-                    scar_count = min(6, state.deaths_count)
-                    for s_idx in range(scar_count):
-                        sx = cx - 22 + (s_idx % 3) * 18
-                        sy = cat_y + 34 + (s_idx // 3) * 26
-                        pygame.draw.line(surface, (220, 22, 32), (sx - 6, sy - 4), (sx + 6, sy + 4), 3)
-                        pygame.draw.circle(surface, (185, 16, 24), (sx + 2, sy + 5), 3)
-                    # White bandage strip across wounded cat
-                    if state.deaths_count >= 2:
-                        band_rect = pygame.Rect(cx - 24, cat_y + 48, 48, 10)
-                        pygame.draw.rect(surface, COLOR_WHITE, band_rect)
-                        pygame.draw.rect(surface, COLOR_RED, (cx - 6, cat_y + 48, 12, 10))
-                        pygame.draw.rect(surface, COLOR_BG, band_rect, 1)
+            if state.is_rolling:
+                roll_rad = math.radians(state.cat_roll_angle)
+                ring_cy = h - 105
+                if cat_sprite is not None:
+                    rot = pygame.transform.rotate(cat_sprite, -state.cat_roll_angle * 0.35)
+                    r_rect = rot.get_rect(center=(cx, ring_cy))
+                    surface.blit(rot, r_rect.topleft)
+                pygame.draw.circle(surface, COLOR_CYAN, (cx, ring_cy), 64, 3)
+                for k in range(4):
+                    a = roll_rad + k * (math.pi * 0.5)
+                    x1 = cx + int(math.cos(a) * 46)
+                    y1 = ring_cy + int(math.sin(a) * 46)
+                    x2 = cx + int(math.cos(a) * 70)
+                    y2 = ring_cy + int(math.sin(a) * 70)
+                    pygame.draw.line(surface, COLOR_CYAN, (x1, y1), (x2, y2), 4)
+                roll_lbl = self._txt(self.font_sm, "CROUCH ROLL ACTIVE", COLOR_CYAN)
+                bg = pygame.Rect(cx - roll_lbl.get_width() // 2 - 6, h - 195, roll_lbl.get_width() + 12, 22)
+                pygame.draw.rect(surface, COLOR_BG, bg)
+                pygame.draw.rect(surface, COLOR_CYAN, bg, 2)
+                surface.blit(roll_lbl, (cx - roll_lbl.get_width() // 2, h - 192))
+            else:
+                if cat_sprite is not None:
+                    # Slight limping tilt when weakened by deaths
+                    if state.deaths_count > 0:
+                        limp_deg = math.sin(state.walk_cycle * 0.5) * min(12.0, state.deaths_count * 1.4)
+                        tilted = pygame.transform.rotate(cat_sprite, limp_deg)
+                        t_rect = tilted.get_rect(center=(cx, cat_y + cat_h // 2))
+                        surface.blit(tilted, t_rect.topleft)
+                    else:
+                        surface.blit(cat_sprite, (cx - cat_w // 2, cat_y))
 
-            left_paw_y = h - 56 + bounce_y - int(state.cat_jump_height * 45)
-            right_paw_y = h - 56 - bounce_y - int(state.cat_jump_height * 45)
-            self._draw_pov_paw(surface, cx - 135, left_paw_y, wounded=state.deaths_count > 0)
-            self._draw_pov_paw(surface, cx + 135, right_paw_y, wounded=state.deaths_count > 0)
-            if state.cat_jump_height > 0.12:
-                jmp_lbl = self._txt(
+                    # Draw battle scars / blood spots / bandages proportional to deaths_count (1..9)
+                    if state.deaths_count > 0:
+                        scar_count = min(6, state.deaths_count)
+                        for s_idx in range(scar_count):
+                            sx = cx - 22 + (s_idx % 3) * 18
+                            sy = cat_y + 34 + (s_idx // 3) * 26
+                            pygame.draw.line(surface, (220, 22, 32), (sx - 6, sy - 4), (sx + 6, sy + 4), 3)
+                            pygame.draw.circle(surface, (185, 16, 24), (sx + 2, sy + 5), 3)
+                        # White bandage strip across wounded cat
+                        if state.deaths_count >= 2:
+                            band_rect = pygame.Rect(cx - 24, cat_y + 48, 48, 10)
+                            pygame.draw.rect(surface, COLOR_WHITE, band_rect)
+                            pygame.draw.rect(surface, COLOR_RED, (cx - 6, cat_y + 48, 12, 10))
+                            pygame.draw.rect(surface, COLOR_BG, band_rect, 1)
+
+                left_paw_y = h - 56 + bounce_y - int(state.cat_jump_height * 45)
+                right_paw_y = h - 56 - bounce_y - int(state.cat_jump_height * 45)
+                self._draw_pov_paw(surface, cx - 135, left_paw_y, wounded=state.deaths_count > 0)
+                self._draw_pov_paw(surface, cx + 135, right_paw_y, wounded=state.deaths_count > 0)
+                if state.cat_jump_height > 0.12 and not is_rebirth:
+                    jmp_lbl = self._txt(
+                        self.font_sm,
+                        f"CAT JUMP ACTIVE ({state.bounce_multiplier:.1f}x)",
+                        COLOR_GOLD,
+                    )
+                    bg = pygame.Rect(cx - jmp_lbl.get_width() // 2 - 6, cat_y - 28, jmp_lbl.get_width() + 12, 22)
+                    pygame.draw.rect(surface, COLOR_BG, bg)
+                    pygame.draw.rect(surface, COLOR_GOLD, bg, 2)
+                    surface.blit(jmp_lbl, (cx - jmp_lbl.get_width() // 2, cat_y - 25))
+
+            if is_rebirth:
+                ankh_y = max(28, cat_y - 54 - int(math.sin(rebirth_prog * math.pi) * 14))
+                pygame.draw.circle(surface, COLOR_GOLD, (cx, ankh_y + 22), 28, 2)
+                ankh_sprite = self._sprite("ankh", 44, 44)
+                if ankh_sprite is not None:
+                    surface.blit(ankh_sprite, (cx - 22, ankh_y))
+                reb_lbl = self._txt(
                     self.font_sm,
-                    f"CAT JUMP ACTIVE ({state.bounce_multiplier:.1f}x)",
+                    f"REINCARNATED! ({state.lives_remaining}/9 LIVES)",
                     COLOR_GOLD,
                 )
-                bg = pygame.Rect(cx - jmp_lbl.get_width() // 2 - 6, cat_y - 28, jmp_lbl.get_width() + 12, 22)
-                pygame.draw.rect(surface, COLOR_BG, bg)
-                pygame.draw.rect(surface, COLOR_GOLD, bg, 2)
-                surface.blit(jmp_lbl, (cx - jmp_lbl.get_width() // 2, cat_y - 25))
+                rbg = pygame.Rect(cx - reb_lbl.get_width() // 2 - 8, max(8, ankh_y - 30), reb_lbl.get_width() + 16, 24)
+                pygame.draw.rect(surface, COLOR_BG, rbg)
+                pygame.draw.rect(surface, COLOR_GOLD, rbg, 2)
+                surface.blit(reb_lbl, (cx - reb_lbl.get_width() // 2, rbg.y + 3))
 
         # Active flying crimson blood droplets after a crash
         for bp in state.blood_particles:
@@ -689,9 +738,9 @@ class UIRenderer:
         Escalating Bounce, Blood Splatter, Obstacles, and Extraction Point Treasure.
         """
         box_w = 282
-        box_h = 244
         box_x = w - box_w - 16
         box_y = 252
+        box_h = max(180, h - box_y - 14)
 
         box_rect = pygame.Rect(box_x, box_y, box_w, box_h)
         self._draw_panel(
@@ -817,14 +866,34 @@ class UIRenderer:
                 pygame.draw.circle(sub, (185, 18, 26), (cat_2d_x - 8 + d_i * 5, floor_y + 3), 3)
 
         cat_pip = self._sprite("burglar_cat", 34, 42)
-        if state.is_rolling:
-            ball_y = floor_y - 12
-            pygame.draw.circle(sub, COLOR_CYAN, (cat_2d_x, ball_y), 12)
-            pygame.draw.circle(sub, COLOR_WHITE, (cat_2d_x, ball_y), 12, 2)
-        elif cat_pip is not None:
-            sub.blit(cat_pip, (cat_2d_x - 17, cat_2d_y - 22))
+        if state.reincarnating_timer > 0.75:
+            pygame.draw.ellipse(sub, COLOR_RED, (cat_2d_x - 20, floor_y - 8, 40, 10), 2)
+            if cat_pip is not None:
+                fallen_pip = pygame.transform.rotate(cat_pip, 90)
+                f_rect = fallen_pip.get_rect(center=(cat_2d_x, floor_y - 10))
+                sub.blit(fallen_pip, f_rect.topleft)
+            else:
+                pygame.draw.ellipse(sub, COLOR_RED, (cat_2d_x - 16, floor_y - 10, 32, 10))
         else:
-            pygame.draw.ellipse(sub, COLOR_WHITE, (cat_2d_x - 14, cat_2d_y - 8, 26, 17))
+            is_pip_rebirth = 0.0 < state.reincarnating_timer <= 0.75
+            if is_pip_rebirth:
+                p_beam = pygame.Surface((26, max(10, floor_y)), pygame.SRCALPHA)
+                pygame.draw.rect(p_beam, (255, 214, 72, 85), (0, 0, 26, p_beam.get_height()))
+                pygame.draw.rect(p_beam, (255, 248, 195, 145), (8, 0, 10, p_beam.get_height()))
+                sub.blit(p_beam, (cat_2d_x - 13, 0))
+            if state.is_rolling:
+                ball_y = floor_y - 12
+                pygame.draw.circle(sub, COLOR_CYAN, (cat_2d_x, ball_y), 12)
+                pygame.draw.circle(sub, COLOR_WHITE, (cat_2d_x, ball_y), 12, 2)
+            elif cat_pip is not None:
+                sub.blit(cat_pip, (cat_2d_x - 17, cat_2d_y - 22))
+            else:
+                pygame.draw.ellipse(sub, COLOR_WHITE, (cat_2d_x - 14, cat_2d_y - 8, 26, 17))
+            if is_pip_rebirth:
+                pygame.draw.circle(sub, COLOR_GOLD, (cat_2d_x, max(14, cat_2d_y - 26)), 11, 2)
+                ankh_pip = self._sprite("ankh", 18, 18)
+                if ankh_pip is not None:
+                    sub.blit(ankh_pip, (cat_2d_x - 9, max(5, cat_2d_y - 35)))
 
         for bp in state.blood_particles[:8]:
             pygame.draw.circle(
@@ -835,7 +904,12 @@ class UIRenderer:
             )
 
         lane_txt = "L" if state.target_lane < 0 else ("R" if state.target_lane > 0 else "C")
-        state_txt = "ROLL" if state.is_rolling else ("JUMP" if state.cat_jump_height > 0.1 else "CREEP")
+        if state.reincarnating_timer > 0.75:
+            state_txt = "DEAD"
+        elif state.reincarnating_timer > 0.0:
+            state_txt = "REBIRTH"
+        else:
+            state_txt = "ROLL" if state.is_rolling else ("JUMP" if state.cat_jump_height > 0.1 else "CREEP")
         info_bg = pygame.Rect(0, sh - 20, sw, 20)
         pygame.draw.rect(sub, (12, 14, 18), info_bg)
         info = self._txt(
@@ -963,82 +1037,58 @@ class UIRenderer:
         cv_sample: MotionSample,
         api_online: bool,
     ) -> None:
-        hud_w = max(460, w - 320)
-        hud_rect = pygame.Rect(16, 14, hud_w, 68)
+        hud_w = max(420, w - 320)
+        hud_rect = pygame.Rect(16, 14, hud_w, 54)
         self._draw_panel(
             surface,
             hud_rect,
             fill=COLOR_BG,
             border=COLOR_RED if state.blood_flash_timer > 0.1 else COLOR_WHITE,
             shadow=COLOR_GOLD,
-            shadow_off=5,
+            shadow_off=4,
         )
 
-        # Column 1: Score & Level
-        score_lbl = self._txt(self.font_xs, f"LVL {state.level:02d}/{MAX_LEVEL:02d} // SCORE", COLOR_GOLD)
-        score_val = self._txt(self.font_md, f"{state.score:06d}", COLOR_WHITE)
-        surface.blit(score_lbl, (26, 20))
-        surface.blit(score_val, (26, 39))
+        # Section 1: Score & Level
+        score_val = self._txt(self.font_md, f"{state.score:05d}", COLOR_WHITE)
+        lvl_lbl = self._txt(self.font_xs, f"LVL {state.level}/{MAX_LEVEL}", COLOR_GOLD)
+        surface.blit(lvl_lbl, (26, 19))
+        surface.blit(score_val, (26, 31))
 
-        # Column 2: Relics & Combo
-        ankh_icon = self._sprite("ankh", 16, 18)
-        if ankh_icon is not None:
-            surface.blit(ankh_icon, (148, 20))
-        coin_lbl = self._txt(self.font_xs, f"RELICS: {state.coins:03d}", COLOR_GOLD)
-        combo_lbl = self._txt(
-            self.font_xs,
-            f"COMBO x{state.combo_multiplier} (STRK {state.streak})",
-            COLOR_CYAN if state.combo_multiplier >= 3 else COLOR_GREEN,
-        )
-        surface.blit(coin_lbl, (168, 21))
-        surface.blit(combo_lbl, (148, 44))
-
-        # Column 3: 9 LIVES Heart Bar & Cat Weakness
-        lives_x = 292
-        lives_col = COLOR_RED if state.lives_remaining <= 3 else (COLOR_AMBER if state.lives_remaining <= 6 else COLOR_GREEN)
-        lives_hdr = self._txt(
-            self.font_xs,
-            f"9 LIVES: {state.lives_remaining}/{state.max_lives} ({int(state.cat_strength * 100)}% STR)",
-            lives_col,
-        )
-        surface.blit(lives_hdr, (lives_x, 21))
+        # Section 2: 9 Lives Indicators (minimal dots/bars)
+        lives_x = 142
+        lives_col = COLOR_RED if state.lives_remaining <= 3 else COLOR_GREEN
+        lives_hdr = self._txt(self.font_xs, f"LIVES {state.lives_remaining}/9", lives_col)
+        surface.blit(lives_hdr, (lives_x, 19))
         for i in range(state.max_lives):
-            pip_rect = pygame.Rect(lives_x + i * 16, 42, 13, 16)
+            pip_rect = pygame.Rect(lives_x + i * 13, 34, 10, 14)
             alive = i < state.lives_remaining
-            pygame.draw.rect(surface, COLOR_RED if alive else COLOR_GRAY_DARK, pip_rect)
-            pygame.draw.rect(surface, COLOR_WHITE if alive else COLOR_GRAY_MID, pip_rect, 1)
+            pygame.draw.rect(surface, COLOR_RED if alive else (45, 45, 50), pip_rect)
+            pygame.draw.rect(surface, COLOR_WHITE if alive else (60, 60, 65), pip_rect, 1)
 
-        # Column 4: Sector Progress Bar
-        dist_x = 452
-        bar_w = max(80, hud_w - 640)
+        # Section 3: Sector Distance Progress Bar
+        dist_x = 282
+        bar_w = max(70, hud_w - 470)
         dist_lbl = self._txt(
             self.font_xs,
-            f"{state.level_name.upper()}: {state.distance_meters:04.1f}M/{state.goal_meters:.0f}M",
+            f"{state.distance_meters:03.0f}M / {state.goal_meters:.0f}M",
             COLOR_WHITE,
         )
-        surface.blit(dist_lbl, (dist_x, 21))
-        bar_rect = pygame.Rect(dist_x, 42, bar_w, 16)
+        surface.blit(dist_lbl, (dist_x, 19))
+        bar_rect = pygame.Rect(dist_x, 34, bar_w, 14)
         pygame.draw.rect(surface, COLOR_GRAY_DARK, bar_rect)
         fill_w = int(bar_rect.width * state.progress_ratio)
         if fill_w > 0:
             pygame.draw.rect(surface, COLOR_GOLD, (bar_rect.x, bar_rect.y, fill_w, bar_rect.height))
-        pygame.draw.rect(surface, COLOR_WHITE, bar_rect, 2)
+        pygame.draw.rect(surface, COLOR_WHITE, bar_rect, 1)
 
-        # Column 5: Hand Gesture & Bounce Status
-        right_x = hud_rect.right - 185
-        pose_lbl = self._txt(
-            self.font_xs,
-            f"HAND: {cv_sample.human_posture} ({'L' if cv_sample.human_lane < 0 else ('R' if cv_sample.human_lane > 0 else 'C')})",
-            COLOR_CYAN if cv_sample.human_posture == "CROUCH" else (COLOR_GOLD if cv_sample.human_posture == "JUMP" else COLOR_GREEN),
-        )
-        b_tag = "MAX" if state.bounce_saturated else f"T{state.bounce_tier}/5"
-        bounce_lbl = self._txt(
-            self.font_xs,
-            f"BOUNCE: {state.bounce_multiplier:.2f}x ({b_tag})",
-            COLOR_GOLD if state.bounce_saturated else COLOR_WHITE,
-        )
-        surface.blit(pose_lbl, (right_x, 21))
-        surface.blit(bounce_lbl, (right_x, 44))
+        # Section 4: Clean Hand Action Cue
+        right_x = hud_rect.right - 150
+        pose_col = COLOR_CYAN if cv_sample.human_posture == "CROUCH" else (COLOR_GOLD if cv_sample.human_posture == "JUMP" else COLOR_GREEN)
+        pose_lbl = self._txt(self.font_sm, f"{cv_sample.human_posture}", pose_col)
+        lane_str = "LANE: " + ("LEFT" if cv_sample.human_lane < 0 else ("RIGHT" if cv_sample.human_lane > 0 else "CENTER"))
+        lane_lbl = self._txt(self.font_xs, lane_str, COLOR_WHITE)
+        surface.blit(pose_lbl, (right_x, 18))
+        surface.blit(lane_lbl, (right_x, 34))
 
     def _draw_cctv_feed(
         self,
