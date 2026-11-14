@@ -130,6 +130,15 @@ class AudioEngine:
         if snd:
             self._sounds["dodge"] = snd
 
+        # Classic arcade dual-tone coin pickup ding (B5 -> E6)
+        tc1 = np.linspace(0, 0.055, int(sr * 0.055), endpoint=False, dtype=np.float32)
+        tc2 = np.linspace(0, 0.13, int(sr * 0.13), endpoint=False, dtype=np.float32)
+        w_c1 = np.sin(2.0 * np.pi * 987.77 * tc1) * self._envelope(len(tc1), 0.04, 0.2)
+        w_c2 = np.sin(2.0 * np.pi * 1318.51 * tc2) * self._envelope(len(tc2), 0.02, 0.65)
+        snd = self._to_sound(np.concatenate([w_c1, w_c2]), volume=0.28)
+        if snd:
+            self._sounds["coin"] = snd
+
     def play(self, name: str) -> None:
         if not self.enabled or not self.available:
             return

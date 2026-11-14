@@ -13,7 +13,7 @@ from backend.models import RunCreate, SettingsPayload, TelemetryEventIn
 from backend.server import create_app
 from config import MAX_LEVEL, GameConfig
 from cv_tracker import MotionTracker
-from game_state import CorridorObstacle, GameState, Phase
+from game_state import CorridorCoin, CorridorObstacle, GameState, Phase
 from ui_renderer import UIRenderer
 
 
@@ -96,6 +96,7 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertEqual(sample.human_lane, -1)
         self.assertEqual(sample.human_posture, "CROUCH")
 
+        # Real CV upward impulse jump detection
         tracker.set_pose_overrides(lane=None, posture=None)
         base_frame = tracker._generate_sim_frame(motion_active=False)
         tracker._compute_motion_and_pose(base_frame, is_sim=False, lane_override=None, posture_override=None)
@@ -105,7 +106,7 @@ class TestLaserPawPatrol(unittest.TestCase):
         )
         self.assertEqual(detected_posture, "JUMP")
 
-    def test_cat_pov_bounce_jump_crouch_roll_and_obstacles(self) -> None:
+    def test_cat_pov_bounce_jump_crouch_roll_coins_and_obstacles(self) -> None:
         state = GameState()
         state.start_heist()
         state.obstacles = [
@@ -113,23 +114,38 @@ class TestLaserPawPatrol(unittest.TestCase):
             CorridorObstacle(kind="LOW_BEAM", distance_m=3.5, lane=0),
             CorridorObstacle(kind="SIDE_BLOCK", distance_m=6.0, lane=0),
         ]
+        state.coins_list = [
+            CorridorCoin(distance_m=1.0, lane=0, tier="LOW_ROLL"),
+            CorridorCoin(distance_m=3.5, lane=0, tier="AIR"),
+            CorridorCoin(distance_m=6.0, lane=1, tier="FLOOR"),
+        ]
 
+        # 1. Crouch-roll under HIGH_GATE + collect LOW_ROLL coin
         state.distance_meters = 0.95
         state.update(0.05, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="CROUCH")
         self.assertTrue(state.is_rolling)
         self.assertTrue(state.obstacles[0].cleared)
+        self.assertTrue(state.coins_list[0].collected)
+        self.assertEqual(state.coins, 1)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
+        # 2. Jump over LOW_BEAM + collect AIR coin
         state.distance_meters = 3.45
         state.update(0.05, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="JUMP")
         self.assertGreater(state.cat_jump_height, 0.0)
         self.assertTrue(state.obstacles[1].cleared)
+        self.assertTrue(state.coins_list[1].collected)
+        self.assertEqual(state.coins, 2)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
+        # 3. Step right to dodge SIDE_BLOCK + collect FLOOR coin in lane 1
         state.distance_meters = 5.90
         for _ in range(5):
             state.update(0.04, motion_score=0.0, is_simulation=True, human_lane=1, human_posture="STAND")
         self.assertTrue(state.obstacles[2].cleared)
+        self.assertTrue(state.coins_list[2].collected)
+        self.assertEqual(state.coins, 3)
+        self.assertGreaterEqual(len(state.popups), 1)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
     def test_ten_level_progression_to_victory(self) -> None:
@@ -145,7 +161,6 @@ class TestLaserPawPatrol(unittest.TestCase):
             self.assertEqual(state.level, expected_lvl + 1)
             self.assertEqual(state.phase, Phase.CREEPING)
 
-        # Completing level 10 triggers VICTORY
         self.assertEqual(state.level, 10)
         state.distance_meters = state.goal_meters
         state.update(0.05, motion_score=0.0, is_simulation=True)
@@ -189,12 +204,14 @@ class TestLaserPawPatrol(unittest.TestCase):
             audio = AudioEngine(enabled=True)
             audio.play("jump")
             audio.play("roll")
+            audio.play("coin")
             audio.play("level_up")
 
             tracker = MotionTracker(force_simulation=True)
             sample = tracker.get_sample()
             state = GameState()
             state.start_heist()
+            state._add_popup("+50 COIN", lane=0, is_gold=True)
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 db = DatabaseManager(os.path.join(tmpdir, "ui.db"))

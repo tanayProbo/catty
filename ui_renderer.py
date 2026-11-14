@@ -27,7 +27,7 @@ from config import (
     get_level_spec,
 )
 from cv_tracker import MotionSample
-from game_state import CorridorObstacle, GameState, Phase
+from game_state import CorridorCoin, CorridorObstacle, GameState, Phase
 
 
 class UIRenderer:
@@ -68,6 +68,7 @@ class UIRenderer:
         self._draw_cat_pov_viewport(surface, w, h, state)
         self._draw_pov_lasers(surface, w, h, state)
         self._draw_cat_pov_foreground(surface, w, h, state)
+        self._draw_floating_popups(surface, w, h, state)
 
         if state.phase == Phase.BUSTED and state.flash_timer > 0.0:
             pulse = abs(math.sin(time.perf_counter() * 14.0))
@@ -185,6 +186,20 @@ class UIRenderer:
             pygame.draw.line(surface, grid_col, (rx0, ry0), (rx1, ry1), 1)
             pygame.draw.line(surface, grid_col, (lx1, ly1), (rx1, ry1), 1)
 
+        # Speed lines when combo >= 2 or rolling/jumping
+        if state.phase in (Phase.CREEPING, Phase.CLEAR) and (
+            state.combo_multiplier >= 2 or state.is_rolling or state.cat_jump_height > 0.1
+        ):
+            line_col = COLOR_CYAN if state.is_rolling else (COLOR_GOLD if state.combo_multiplier >= 3 else COLOR_GREEN)
+            for idx in range(6):
+                ang = (idx / 6.0) * math.pi * 2.0 + (state.walk_cycle * 0.25)
+                sx1 = vx + int(math.cos(ang) * 160)
+                sy1 = vy + int(math.sin(ang) * 110)
+                sx2 = vx + int(math.cos(ang) * 340)
+                sy2 = vy + int(math.sin(ang) * 230)
+                if 10 < sx2 < corridor_w - 10 and 85 < sy2 < h - 40:
+                    pygame.draw.line(surface, line_col, (sx1, sy1), (sx2, sy2), 2)
+
         rem_dist = max(1.2, state.goal_meters - state.distance_meters)
         if rem_dist < 45.0:
             bx, by, bscale = self._project_corridor_point(
@@ -194,6 +209,17 @@ class UIRenderer:
             goal_col = COLOR_GOLD if state.level == MAX_LEVEL else COLOR_GREEN
             pygame.draw.circle(surface, goal_col, (bx, by), radius)
             pygame.draw.circle(surface, COLOR_WHITE, (bx, by), radius, 2)
+
+        # Draw 3D Coins and Obstacles sorted by distance
+        visible_coins = [
+            c
+            for c in state.coins_list
+            if not c.collected and -0.2 <= (c.distance_m - state.distance_meters) <= 32.0
+        ]
+        visible_coins.sort(key=lambda c: c.distance_m, reverse=True)
+        for coin in visible_coins:
+            c_depth = coin.distance_m - state.distance_meters
+            self._draw_pov_coin(surface, coin, c_depth, vx, vy, corridor_w, h, cam_h, state)
 
         visible_obs = [
             obs
@@ -211,6 +237,31 @@ class UIRenderer:
         )
         hint_surf = self.font_xs.render(hint, True, (175, 175, 185))
         surface.blit(hint_surf, (18, h - 24))
+
+    def _draw_pov_coin(
+        self,
+        surface: pygame.Surface,
+        coin: CorridorCoin,
+        depth: float,
+        vx: int,
+        vy: int,
+        corridor_w: int,
+        h: int,
+        cam_h: float,
+        state: GameState,
+    ) -> None:
+        height_y = 0.56 if coin.tier == "AIR" else (0.14 if coin.tier == "LOW_ROLL" else 0.22)
+        cx, cy, scale = self._project_corridor_point(
+            float(coin.lane), height_y, depth, vx, vy, corridor_w, h, cam_h, state.cat_lane_pos
+        )
+        r = max(5, int(34 * scale))
+        spin_w = max(4, int(r * 2 * (0.35 + 0.65 * abs(math.cos(math.radians(state.coin_spin_angle + coin.distance_m * 25))))))
+        coin_rect = pygame.Rect(cx - spin_w // 2, cy - r, spin_w, r * 2)
+        pygame.draw.ellipse(surface, COLOR_GOLD, coin_rect)
+        pygame.draw.ellipse(surface, COLOR_WHITE, coin_rect, 2)
+        if r >= 8 and spin_w >= 8:
+            inner = coin_rect.inflate(-max(4, spin_w // 3), -max(4, r // 2))
+            pygame.draw.ellipse(surface, COLOR_AMBER, inner, 2)
 
     def _draw_pov_obstacle(
         self,
@@ -271,6 +322,22 @@ class UIRenderer:
             pygame.draw.rect(surface, COLOR_RED, pylon_rect, 3)
             pygame.draw.line(surface, COLOR_AMBER, pylon_rect.topleft, pylon_rect.bottomright, 2)
             pygame.draw.line(surface, COLOR_AMBER, pylon_rect.topright, pylon_rect.bottomleft, 2)
+
+    def _draw_floating_popups(
+        self, surface: pygame.Surface, w: int, h: int, state: GameState
+    ) -> None:
+        corridor_w = max(560, w - 300)
+        cx = corridor_w // 2
+        for idx, p in enumerate(state.popups):
+            px = cx + p.lane * 135
+            rise = int((1.0 - p.timer) * 70)
+            py = int(h * 0.46) - rise - idx * 22
+            col = COLOR_GOLD if p.is_gold else COLOR_CYAN
+            lbl = self.font_md.render(p.text, True, col)
+            bg_r = pygame.Rect(px - lbl.get_width() // 2 - 6, py - 2, lbl.get_width() + 12, lbl.get_height() + 4)
+            pygame.draw.rect(surface, COLOR_BG, bg_r)
+            pygame.draw.rect(surface, col, bg_r, 2)
+            surface.blit(lbl, (px - lbl.get_width() // 2, py))
 
     def _draw_pov_lasers(
         self, surface: pygame.Surface, w: int, h: int, state: GameState
@@ -395,6 +462,17 @@ class UIRenderer:
         cat_2d_x = 58
         pixels_per_m = 11.0
 
+        # Draw 2D Coins in side-view
+        for coin in state.coins_list:
+            if coin.collected:
+                continue
+            rel_m = coin.distance_m - state.distance_meters
+            cx_2d = cat_2d_x + int(rel_m * pixels_per_m)
+            if 0 <= cx_2d <= sw:
+                cy_2d = floor_y - 44 if coin.tier == "AIR" else (floor_y - 10 if coin.tier == "LOW_ROLL" else floor_y - 16)
+                pygame.draw.circle(sub, COLOR_GOLD, (cx_2d, cy_2d), 5)
+                pygame.draw.circle(sub, COLOR_WHITE, (cx_2d, cy_2d), 5, 1)
+
         for obs in state.obstacles:
             if obs.cleared:
                 continue
@@ -445,7 +523,7 @@ class UIRenderer:
 
         lane_txt = "LEFT" if state.target_lane < 0 else ("RIGHT" if state.target_lane > 0 else "CENTER")
         state_txt = "ROLLING" if state.is_rolling else ("JUMPING" if state.cat_jump_height > 0.1 else "BOUNCING")
-        info = self.font_xs.render(f"LANE: {lane_txt} | {state_txt}", True, COLOR_WHITE)
+        info = self.font_xs.render(f"LANE: {lane_txt} | {state_txt} | COINS: {state.coins}", True, COLOR_WHITE)
         sub.blit(info, (8, sh - 18))
 
     def _draw_top_hud(
@@ -460,18 +538,31 @@ class UIRenderer:
         hud_rect = pygame.Rect(18, 14, hud_w, 66)
         self._draw_panel(surface, hud_rect, fill=COLOR_BG, border=COLOR_WHITE, shadow=COLOR_WHITE, shadow_off=5)
 
-        score_lbl = self.font_xs.render(f"LVL {state.level:02d}/{MAX_LEVEL:02d}", True, COLOR_GOLD)
+        score_lbl = self.font_xs.render(f"LVL {state.level:02d}/{MAX_LEVEL:02d} // SCORE", True, COLOR_GOLD)
         score_val = self.font_md.render(f"{state.score:06d}", True, COLOR_WHITE)
-        surface.blit(score_lbl, (32, 22))
-        surface.blit(score_val, (32, 40))
+        surface.blit(score_lbl, (30, 22))
+        surface.blit(score_val, (30, 40))
 
+        # Coin counter & Combo badge
+        pygame.draw.circle(surface, COLOR_GOLD, (162, 30), 7)
+        pygame.draw.circle(surface, COLOR_WHITE, (162, 30), 7, 1)
+        coin_lbl = self.font_xs.render(f"COINS: {state.coins:03d}", True, COLOR_GOLD)
+        combo_lbl = self.font_xs.render(
+            f"COMBO x{state.combo_multiplier} (STRK {state.streak})",
+            True,
+            COLOR_CYAN if state.combo_multiplier >= 3 else COLOR_GREEN,
+        )
+        surface.blit(coin_lbl, (174, 23))
+        surface.blit(combo_lbl, (154, 45))
+
+        dist_x = 308
         dist_lbl = self.font_xs.render(
             f"{state.level_name}: {state.distance_meters:04.1f}M / {state.goal_meters:.0f}M",
             True,
             COLOR_WHITE,
         )
-        surface.blit(dist_lbl, (158, 22))
-        bar_rect = pygame.Rect(158, 43, max(110, hud_w - 340), 18)
+        surface.blit(dist_lbl, (dist_x, 22))
+        bar_rect = pygame.Rect(dist_x, 43, max(90, hud_w - 495), 18)
         pygame.draw.rect(surface, COLOR_GRAY_DARK, bar_rect)
         fill_w = int(bar_rect.width * state.progress_ratio)
         if fill_w > 0:
@@ -484,7 +575,7 @@ class UIRenderer:
             True,
             COLOR_CYAN if cv_sample.human_posture == "CROUCH" else (COLOR_GOLD if cv_sample.human_posture == "JUMP" else COLOR_GREEN),
         )
-        api_text = f"STREAK x{state.streak} | {'API ON' if api_online else 'LOCAL'}"
+        api_text = f"DB: {'ONLINE' if api_online else 'LOCAL'}"
         api_lbl = self.font_xs.render(api_text, True, COLOR_WHITE)
         surface.blit(pose_lbl, (right_x, 23))
         surface.blit(api_lbl, (right_x, 45))
@@ -590,7 +681,6 @@ class UIRenderer:
         surface.blit(title, (box.centerx - title.get_width() // 2, box.y + 18))
         surface.blit(sub, (box.centerx - sub.get_width() // 2, box.y + 74))
 
-        # 10-Level selector strip
         sel_spec = get_level_spec(state.config.starting_level)
         lvl_hdr = self.font_sm.render(
             f"SELECTED START: LEVEL {sel_spec.number:02d}/{MAX_LEVEL:02d} - {sel_spec.name} ({sel_spec.goal_meters:.0f}M)",
@@ -611,9 +701,9 @@ class UIRenderer:
             surface.blit(n_lbl, (p_rect.centerx - n_lbl.get_width() // 2, p_rect.centery - n_lbl.get_height() // 2))
 
         lines = [
-            "JUMP (OR W / UP / SPACE): LEAP OVER LOW FLOOR LASERS",
-            "CROUCH (OR S / DOWN): ROLL UNDER HIGH LASER GATES",
-            "MOVE LEFT / RIGHT (OR A / D): SHIFT CORRIDOR LANES",
+            "JUMP (OR W / UP / SPACE): LEAP LASERS & GRAB AIR COINS",
+            "CROUCH (OR S / DOWN): ROLL UNDER GATES & COLLECT LOW COINS",
+            "MOVE LEFT / RIGHT (OR A / D): SHIFT LANES & BUILD COMBO",
             "RED LASER SWEEP: FREEZE UNTIL THE SCAN TURNS GREEN",
             "KEYS 1-9 / 0 (OR - / =): SELECT STARTING LEVEL 1 TO 10",
         ]
@@ -642,7 +732,7 @@ class UIRenderer:
         reason_line = state.busted_reason if busted else "THE GOLDEN VAULT FISH BOWL IS YOURS"
         stats_lines = [
             reason_line,
-            f"FINAL SCORE: {state.score}   |   MAX STREAK: x{state.max_streak}",
+            f"SCORE: {state.score}   |   COINS: {state.coins}   |   STREAK: x{state.max_streak}",
             f"SECTOR: LVL {state.level:02d} ({state.level_name})   |   RUN SAVED",
         ]
         for idx, line in enumerate(stats_lines):
