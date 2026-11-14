@@ -1,62 +1,32 @@
-# LASER_PAW_PATROL // CV Arcade Stealth Game
+# LASER_PAW_PATROL // Cat 3D POV & 2D Mini-Window Stealth Runner
 
-**LASER_PAW_PATROL** is a high-performance, Python-based computer vision arcade stealth game built with **Pygame-ce**, **OpenCV (`cv2`)**, **NumPy**, and an embedded **FastAPI + SQLite** leaderboard/telemetry backend.
-
----
-
-## Core Features & Architecture
-
-- **Real-Time Computer Vision (`cv_tracker.py`)**:
-  - Hooks into `cv2.VideoCapture(0)` in a dedicated daemon thread and calculates frame-to-frame motion delta (`cv2.absdiff` + Gaussian blur + binary threshold percentage).
-  - **Zero-Crash Simulation Fallback**: Automatically falls back to a synthetic CCTV simulation mode if no webcam is connected or if a camera disconnects mid-session.
-- **Neobrutalist & Cyberpunk Aesthetic (`ui_renderer.py`, `config.py`)**:
-  - Pure pitch-black (`#000000`) canvas, stark white (`#FFFFFF`) 3px borders with hard offset brutalist drop shadows, neon security red (`#FF3333`) laser grids, and matrix terminal green (`#00FF66`) clear zones.
-  - Procedural vector-drawn chubby stealth cat (with night-vision goggles), animated guard dog chase sequence, glowing golden fish bowl, live corner CCTV feed with blinking `REC` indicator, and top HUD.
-- **Procedural Audio Engine (`audio_engine.py`)**:
-  - Synthesizes warning klaxons, busted sirens, clear triad chimes, and victory fanfares in memory using NumPy waveforms and `pygame.sndarray` — zero external audio files required.
-- **Embedded FastAPI + SQLite Backend (`backend/`)**:
-  - Automatically launches a background FastAPI REST server (`http://127.0.0.1:8765`) backed by a thread-safe WAL SQLite database (`laser_paw_patrol.db`) to persist heist runs, CV motion telemetry events, leaderboards, and sensitivity settings.
+**LASER_PAW_PATROL** is a high-performance Python computer vision arcade stealth runner built with **Pygame-ce**, **OpenCV (`cv2`)**, **NumPy**, and an embedded **FastAPI + SQLite** leaderboard/telemetry backend.
 
 ---
 
-## Project Structure
+## Key Gameplay & CV Highlights
 
-```text
-LASER_PAW_PATROL/
-├── main.py                      # One-command entry point & Pygame event loop
-├── config.py                    # Neobrutalist palette, CV & gameplay constants
-├── cv_tracker.py                # OpenCV absdiff motion detector & mock CCTV fallback
-├── game_state.py                # Heist state machine (CREEPING, WARNING, FREEZE, CLEAR, BUSTED, VICTORY)
-├── ui_renderer.py               # Neobrutalist HUD, CCTV preview, laser grid & vector sprites
-├── audio_engine.py              # Procedural NumPy/Pygame sound synthesizer
-├── backend/
-│   ├── __init__.py
-│   ├── models.py                # Pydantic schemas for runs, telemetry, stats & settings
-│   ├── database.py              # Thread-safe SQLite manager
-│   ├── server.py                # FastAPI REST endpoints (/health, /api/runs, /api/leaderboard, /api/stats)
-│   └── client.py                # Non-blocking background server launcher & HTTP client
-├── tests/
-│   └── test_laser_paw_patrol.py # Automated unit & integration tests
-└── requirements.txt
-```
+- **Bouncing First-Person Cat POV (Main Viewport)**:
+  - Run down a 3-lane cyberpunk security vault from the **Cat's First-Person POV** complete with bouncing front paws, twitching whiskers, cat-ear night-vision visor HUD, and perspective 3D obstacles rushing toward you.
+  - **Crouch-Roll Under Obstacles**: When you crouch (or press `S`/`DOWN`), the Cat POV camera drops low to the floor with a 360° cyber barrel-roll spin as the cat rolls underneath overhead laser gates!
+  - **Jump Over Floor Tripwires**: When you jump (or press `W`/`UP`), the Cat leaps high over floor laser beams.
+  - **3-Lane Side-Step**: Move left/center/right in front of the webcam (or press `A`/`D` / `LEFT`/`RIGHT`) to dodge lane security pylons.
+  - **Red Laser Sweep Freeze**: Periodically, full-corridor security lasers sweep across the screen — freeze completely still for 2.6 seconds so `cv2.absdiff` motion stays below threshold!
+- **Synchronized 2D Side-View Environment Mini-Window (`2D ENV // SIDE-VIEW TRACKER`)**:
+  - A live Picture-in-Picture window on the right side of the screen renders the 2D side-scrolling environment in real time: watch the chubby 2D cat bounce forward, leap over low beams, curl into a spinning ball rolling underneath high gates, and race toward the golden fish bowl.
+- **Real-Time Webcam Human Pose + Motion Tracking (`cv_tracker.py`)**:
+  - Tracks human vertical posture (`JUMP ^` vs `CROUCH/ROLL v` vs `STAND`) and horizontal lane (`LEFT | CENTER | RIGHT`) alongside `cv2.absdiff` frame-delta motion detection, with automatic zero-crash fallback to Simulation Mode if no camera is attached.
 
 ---
 
 ## Quick Start
 
-### 1. Install Dependencies
-
 ```bash
 pip install -r requirements.txt
-```
-
-### 2. Launch the Game
-
-```bash
 python main.py
 ```
 
-### 3. Run Automated Tests
+### Run Automated Tests
 
 ```bash
 python -m unittest discover -s tests -v
@@ -64,15 +34,17 @@ python -m unittest discover -s tests -v
 
 ---
 
-## Controls
+## Controls (Webcam Human Pose + Keyboard)
 
-| Key | Action |
+| Input / Action | Effect |
 | :--- | :--- |
-| **`ENTER`** | Start Heist / Play Again |
-| **`SPACE` (Hold)** | Simulate motion in Simulation Mode (or test failing a freeze) |
-| **`M`** | Toggle between Live Webcam (`CAM_00`) and Simulation Mode |
+| **Human Jump** or **`W` / `UP`** | Cat Jumps over low floor laser beams |
+| **Human Crouch** or **`S` / `DOWN`** | Cat Crouches & Rolls underneath high laser gates |
+| **Human Move Left/Right** or **`A` / `D` / `LEFT` / `RIGHT`** | Shift Cat between Left, Center, and Right lanes |
+| **`C`** | Calibrate current webcam posture as neutral standing height |
+| **`ENTER` / `R`** | Start Heist / Quick Retry |
+| **`SPACE` (Hold)** | Simulate motion burst during Freeze in Simulation Mode |
+| **`M`** | Toggle Live Webcam (`CAM_00`) vs Simulation Mode |
 | **`[` / `]`** | Decrease / Increase CV Motion Threshold sensitivity |
-| **`A`** | Toggle Procedural Audio Mute |
 | **`TAB`** | Open / Close Live SQLite & FastAPI Leaderboard Modal |
-| **`R`** | Quick Retry after `BUSTED` or `VICTORY` |
 | **`ESC`** | Return to Menu / Quit |
