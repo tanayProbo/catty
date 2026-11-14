@@ -108,9 +108,10 @@ def main() -> int:
                             kb_lane = None
                             state.start_heist()
 
-                    # Jump (Human Jump or W / UP)
-                    elif event.key in (pygame.K_w, pygame.K_UP):
-                        state.trigger_jump()
+                    # Jump (Human Jump or W / UP / SPACE)
+                    elif event.key in (pygame.K_w, pygame.K_UP, pygame.K_SPACE):
+                        if state.phase != Phase.FREEZE:
+                            state.trigger_jump()
 
                     # Crouch & Roll under obstacles (Human Crouch or S / DOWN)
                     elif event.key in (pygame.K_s, pygame.K_DOWN):
@@ -154,7 +155,7 @@ def main() -> int:
 
             # Sync held keyboard posture with CV tracker for visual feedback in CCTV box
             posture_ovr: Optional[PostureType] = None
-            if keys[pygame.K_w] or keys[pygame.K_UP]:
+            if keys[pygame.K_w] or keys[pygame.K_UP] or (keys[pygame.K_SPACE] and state.phase != Phase.FREEZE):
                 posture_ovr = "JUMP"
             elif keys[pygame.K_s] or keys[pygame.K_DOWN]:
                 posture_ovr = "CROUCH"
