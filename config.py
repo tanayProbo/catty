@@ -39,10 +39,10 @@ SWEEP_INTERVAL_MAX = 11.5
 
 # Cat Jump, Bounce & Crouch-Roll Physics
 CAT_BOUNCE_FREQ = 9.5              # Natural bouncy paw-step cadence
-CAT_JUMP_DURATION_SEC = 0.68       # Airtime when human jumps
-CAT_ROLL_DURATION_SEC = 0.72       # Roll-under-obstacle duration when human crouches
-OBSTACLE_SPAWN_MIN_SEC = 1.45
-OBSTACLE_SPAWN_MAX_SEC = 2.40
+CAT_JUMP_DURATION_SEC = 0.95       # Responsive, generous airtime when human jumps
+CAT_ROLL_DURATION_SEC = 0.80       # Roll-under-obstacle duration when human crouches
+OBSTACLE_SPAWN_MIN_SEC = 1.55
+OBSTACLE_SPAWN_MAX_SEC = 2.50
 
 # Computer Vision & Human Pose Zones
 CV_CAMERA_INDEX = 0
@@ -50,8 +50,8 @@ CV_FRAME_WIDTH = 320
 CV_FRAME_HEIGHT = 240
 DEFAULT_MOTION_THRESHOLD = 14.0    # Mean absdiff / percentage metric (0 - 100 scale)
 CV_BLUR_KERNEL = (15, 15)
-CV_JUMP_Y_THRESHOLD = 0.34         # Normalized Y < 0.34 -> Human JUMP detected
-CV_CROUCH_Y_THRESHOLD = 0.64       # Normalized Y > 0.64 -> Human CROUCH/ROLL detected
+CV_JUMP_Y_THRESHOLD = 0.42         # Normalized Y < 0.42 (or upward impulse) -> Human JUMP detected
+CV_CROUCH_Y_THRESHOLD = 0.62       # Normalized Y > 0.62 -> Human CROUCH/ROLL detected
 CV_LEFT_X_THRESHOLD = 0.38         # Normalized X < 0.38 -> Human LEFT lane
 CV_RIGHT_X_THRESHOLD = 0.62        # Normalized X > 0.62 -> Human RIGHT lane
 

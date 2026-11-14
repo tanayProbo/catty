@@ -70,6 +70,7 @@ class GameState:
     cat_bounce_height: float = 0.0  # Continuous rhythmic bounce 0.0 .. 1.0
     cat_jump_timer: float = 0.0     # Remaining jump airtime
     cat_jump_height: float = 0.0    # Parabolic jump height 0.0 .. 1.0
+    jump_grace_timer: float = 0.0   # Post-jump landing grace window for obstacle clearance
     cat_roll_timer: float = 0.0     # Remaining crouch-roll time
     cat_roll_angle: float = 0.0     # 0 .. 360 deg barrel roll spin
     is_crouching: bool = False      # Whether human is currently crouching
@@ -123,6 +124,7 @@ class GameState:
         self.cat_bounce_height = 0.0
         self.cat_jump_timer = 0.0
         self.cat_jump_height = 0.0
+        self.jump_grace_timer = 0.0
         self.cat_roll_timer = 0.0
         self.cat_roll_angle = 0.0
         self.is_crouching = False
@@ -150,11 +152,13 @@ class GameState:
         self.flash_timer = 0.0
 
     def trigger_jump(self) -> None:
-        """Trigger a high cat jump when the human jumps (or presses UP/W)."""
+        """Trigger a high, instant-response cat jump when the human jumps (or presses UP/W/SPACE)."""
         if self.phase not in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             return
-        if self.cat_jump_timer <= 0.05:
+        if self.cat_jump_timer <= 0.22:
             self.cat_jump_timer = CAT_JUMP_DURATION_SEC
+            self.cat_jump_height = max(0.38, self.cat_jump_height)
+            self.jump_grace_timer = 0.28
             self.cat_roll_timer = 0.0
             self.is_crouching = False
             self._emit_sound("jump")
@@ -264,9 +268,12 @@ class GameState:
         if self.cat_jump_timer > 0.0:
             self.cat_jump_timer = max(0.0, self.cat_jump_timer - dt)
             prog = 1.0 - (self.cat_jump_timer / CAT_JUMP_DURATION_SEC)
-            self.cat_jump_height = math.sin(prog * math.pi)
+            self.cat_jump_height = max(0.25, math.sin(prog * math.pi))
+            self.jump_grace_timer = 0.25
         else:
             self.cat_jump_height = 0.0
+            if self.jump_grace_timer > 0.0:
+                self.jump_grace_timer = max(0.0, self.jump_grace_timer - dt)
 
         if self.cat_roll_timer > 0.0:
             self.cat_roll_timer = max(0.0, self.cat_roll_timer - dt)
@@ -345,7 +352,11 @@ class GameState:
                         return
 
                 elif obs.kind == "LOW_BEAM":
-                    if self.cat_jump_height > 0.25 or self.cat_jump_timer > 0.05:
+                    if (
+                        self.cat_jump_height > 0.12
+                        or self.cat_jump_timer > 0.0
+                        or self.jump_grace_timer > 0.0
+                    ):
                         obs.cleared = True
                         self.score += 150
                         self.streak += 1

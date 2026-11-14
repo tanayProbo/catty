@@ -1,4 +1,4 @@
-"""Real-time OpenCV motion & human pose tracker (Jump, Crouch/Roll, Left/Right) with simulation fallback."""
+"""Real-time OpenCV motion & human pose tracker (High-Sensitivity Jump, Crouch/Roll, Left/Right)."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class MotionSample:
 
 
 class MotionTracker:
-    """Thread-safe OpenCV frame-differencing & human jump/crouch/side-move tracker."""
+    """Thread-safe OpenCV frame-differencing & multi-signal human jump/crouch/side-move tracker."""
 
     def __init__(
         self,
@@ -63,13 +63,16 @@ class MotionTracker:
         self._sim_phase: float = 0.0
         self._consecutive_failures: int = 0
 
-        # Human pose tracking state
+        # Human pose & multi-signal jump tracking state
         self._face_cascade = self._load_face_cascade()
         self._smoothed_x: float = 0.5
-        self._smoothed_y: float = 0.5
+        self._smoothed_y: float = 0.50
+        self._prev_raw_y: float = 0.50
         self._neutral_y: float = 0.50
         self._human_lane: int = 0
         self._human_posture: PostureType = "STAND"
+        self._jump_hold_until: float = 0.0
+        self._crouch_suppress_until: float = 0.0
 
         # Keyboard / simulation pose input
         self._sim_lane_override: Optional[int] = None
@@ -182,7 +185,8 @@ class MotionTracker:
     def calibrate_neutral(self) -> None:
         """Calibrate current tracked Y position as the player's neutral standing height."""
         with self._lock:
-            self._neutral_y = max(0.30, min(0.70, self._smoothed_y))
+            self._neutral_y = max(0.32, min(0.68, self._smoothed_y))
+            self._jump_hold_until = 0.0
 
     def reset_reference(self) -> None:
         """Reset previous frame baseline before a new freeze window."""
@@ -198,38 +202,68 @@ class MotionTracker:
         lane_override: Optional[int],
         posture_override: Optional[PostureType],
     ) -> tuple[float, float, int, PostureType]:
-        """Detect human (x, y) centroid from face cascade or motion silhouette."""
+        """Multi-signal human pose detector (Face + Top-Motion Crown + Upward Impulse Velocity)."""
+        now = time.perf_counter()
         target_x = self._smoothed_x
         target_y = self._smoothed_y
         detected = False
+        upward_impulse_jump = False
 
         if not is_sim:
-            # 1. Primary: Haar cascade face/head tracking for responsive Jump/Crouch/Side-step
+            face_found = False
+            # 1. Primary: Permissive Haar cascade face/head tracking
             if self._face_cascade is not None:
                 try:
                     faces = self._face_cascade.detectMultiScale(
                         gray,
-                        scaleFactor=1.2,
-                        minNeighbors=4,
-                        minSize=(28, 28),
+                        scaleFactor=1.15,
+                        minNeighbors=3,
+                        minSize=(24, 24),
                     )
                     if len(faces) > 0:
-                        # Pick largest detected face
                         fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
                         target_x = float(fx + fw * 0.5) / float(self.width)
-                        target_y = float(fy + fh * 0.5) / float(self.height)
+                        target_y = float(fy + fh * 0.45) / float(self.height)
                         detected = True
+                        face_found = True
                 except Exception:
                     pass
 
-            # 2. Fallback: Motion silhouette centroid when player moves fast
-            if not detected and delta is not None:
-                _, mask = cv2.threshold(delta, 22, 255, cv2.THRESH_BINARY)
-                moments = cv2.moments(mask)
-                if moments["m00"] > 12000:
-                    target_x = float(moments["m10"] / moments["m00"]) / float(self.width)
-                    target_y = float(moments["m01"] / moments["m00"]) / float(self.height)
-                    detected = True
+            # 2. Motion Crown & Upward Impulse Detector (catches fast jumps even when face blurs!)
+            if delta is not None:
+                _, mask = cv2.threshold(delta, 18, 255, cv2.THRESH_BINARY)
+                ys, xs = np.nonzero(mask)
+                if len(ys) > 35:
+                    motion_x = float(np.mean(xs)) / float(self.width)
+                    # Track top 18th percentile of moving pixels (head/shoulders crown)
+                    top_crown_y = float(np.percentile(ys, 18)) / float(self.height)
+                    bottom_y = float(np.percentile(ys, 85)) / float(self.height)
+
+                    # Check upper-frame burst (head/arms shooting into upper 38% of frame)
+                    upper_zone_cutoff = int(self.height * 0.38)
+                    upper_active_pct = (
+                        float(np.count_nonzero(mask[:upper_zone_cutoff, :]))
+                        / float(max(1, upper_zone_cutoff * self.width))
+                    ) * 100.0
+
+                    if not face_found:
+                        target_x = motion_x
+                        # If motion is concentrated low in the frame, track lower body; otherwise track upper crown
+                        if bottom_y > 0.72 and top_crown_y > 0.48:
+                            target_y = float(np.mean(ys)) / float(self.height)
+                        else:
+                            target_y = min(self._smoothed_y, top_crown_y + 0.06)
+                        detected = True
+                    else:
+                        # Even if face was found, if the motion crown jumped higher, use the higher point
+                        target_y = min(target_y, top_crown_y + 0.05)
+
+                    # Detect rapid upward velocity or strong upper-frame jump burst
+                    vy = target_y - self._prev_raw_y
+                    if (vy < -0.032 and top_crown_y < self._neutral_y - 0.04) or (
+                        upper_active_pct > 4.2 and top_crown_y < self._neutral_y - 0.05
+                    ):
+                        upward_impulse_jump = True
 
         # Apply keyboard / simulation overrides when active
         if lane_override is not None:
@@ -240,18 +274,24 @@ class MotionTracker:
 
         if posture_override is not None:
             if posture_override == "JUMP":
-                target_y = 0.20
+                target_y = 0.18
+                upward_impulse_jump = True
             elif posture_override == "CROUCH":
                 target_y = 0.80
             else:
-                target_y = 0.50
+                target_y = self._neutral_y
             detected = True
         elif is_sim:
-            target_y = 0.50
+            target_y = self._neutral_y
 
         if detected or is_sim:
-            self._smoothed_x = self._smoothed_x * 0.55 + target_x * 0.45
-            self._smoothed_y = self._smoothed_y * 0.55 + target_y * 0.45
+            self._prev_raw_y = target_y
+            self._smoothed_x = self._smoothed_x * 0.50 + target_x * 0.50
+            # Fast asymmetric smoothing: react almost instantly (82%) when moving UP for a jump!
+            if target_y < self._smoothed_y:
+                self._smoothed_y = self._smoothed_y * 0.18 + target_y * 0.82
+            else:
+                self._smoothed_y = self._smoothed_y * 0.45 + target_y * 0.55
 
         # Classify horizontal lane (-1 = LEFT, 0 = CENTER, +1 = RIGHT)
         if lane_override is not None:
@@ -263,17 +303,28 @@ class MotionTracker:
         else:
             lane = 0
 
-        # Classify vertical posture (JUMP vs CROUCH/ROLL vs STAND)
-        jump_thresh = min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.13)
-        crouch_thresh = max(CV_CROUCH_Y_THRESHOLD, self._neutral_y + 0.13)
+        # Dynamic jump & crouch thresholds relative to neutral baseline
+        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.075))
+        crouch_thresh = min(0.82, max(CV_CROUCH_Y_THRESHOLD, self._neutral_y + 0.105))
+
         if posture_override is not None:
             posture: PostureType = posture_override
-        elif self._smoothed_y < jump_thresh:
+            if posture == "JUMP":
+                self._jump_hold_until = now + 0.35
+                self._crouch_suppress_until = now + 0.60
+        elif upward_impulse_jump or self._smoothed_y < jump_thresh:
             posture = "JUMP"
-        elif self._smoothed_y > crouch_thresh:
+            self._jump_hold_until = now + 0.38
+            self._crouch_suppress_until = now + 0.68
+        elif now < self._jump_hold_until:
+            posture = "JUMP"
+        elif self._smoothed_y > crouch_thresh and now >= self._crouch_suppress_until:
             posture = "CROUCH"
         else:
             posture = "STAND"
+            # Gently adapt neutral baseline toward standing head height when player is steady
+            if not is_sim and detected and abs(self._smoothed_y - self._neutral_y) < 0.06:
+                self._neutral_y = self._neutral_y * 0.98 + self._smoothed_y * 0.02
 
         return self._smoothed_x, self._smoothed_y, lane, posture
 
@@ -285,30 +336,33 @@ class MotionTracker:
         lane: int,
         posture: PostureType,
     ) -> None:
-        """Overlay jump/crouch thresholds, lane dividers, and human tracking reticle."""
+        """Overlay dynamic jump/crouch thresholds, lane dividers, and human tracking reticle."""
         w, h = self.width, self.height
-        jump_y = int(h * CV_JUMP_Y_THRESHOLD)
-        crouch_y = int(h * CV_CROUCH_Y_THRESHOLD)
+        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.075))
+        crouch_thresh = min(0.82, max(CV_CROUCH_Y_THRESHOLD, self._neutral_y + 0.105))
+
+        jump_y = int(h * jump_thresh)
+        crouch_y = int(h * crouch_thresh)
         left_x = int(w * CV_LEFT_X_THRESHOLD)
         right_x = int(w * CV_RIGHT_X_THRESHOLD)
 
         # Zone lines
-        cv2.line(frame_bgr, (0, jump_y), (w, jump_y), (255, 200, 0), 1)
-        cv2.line(frame_bgr, (0, crouch_y), (w, crouch_y), (0, 180, 255), 1)
+        cv2.line(frame_bgr, (0, jump_y), (w, jump_y), (0, 220, 255), 2 if posture == "JUMP" else 1)
+        cv2.line(frame_bgr, (0, crouch_y), (w, crouch_y), (255, 200, 0), 2 if posture == "CROUCH" else 1)
         cv2.line(frame_bgr, (left_x, 0), (left_x, h), (70, 90, 80), 1)
         cv2.line(frame_bgr, (right_x, 0), (right_x, h), (70, 90, 80), 1)
 
         # Zone labels
-        cv2.putText(frame_bgr, "JUMP ^", (8, jump_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 220, 0), 1)
-        cv2.putText(frame_bgr, "CROUCH/ROLL v", (8, crouch_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 200, 255), 1)
+        cv2.putText(frame_bgr, "JUMP LINE ^", (8, max(12, jump_y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 230, 255), 1)
+        cv2.putText(frame_bgr, "CROUCH/ROLL v", (8, min(h - 6, crouch_y + 13)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 210, 0), 1)
 
         # Tracked human reticle
         px, py = int(bx * w), int(by * h)
         ret_color = (0, 255, 102)
         if posture == "JUMP":
-            ret_color = (255, 230, 0)
+            ret_color = (0, 230, 255)
         elif posture == "CROUCH":
-            ret_color = (0, 210, 255)
+            ret_color = (255, 210, 0)
 
         cv2.circle(frame_bgr, (px, py), 16, ret_color, 2)
         cv2.line(frame_bgr, (px - 22, py), (px + 22, py), ret_color, 1)
@@ -316,7 +370,7 @@ class MotionTracker:
 
         lane_str = "LEFT" if lane < 0 else ("RIGHT" if lane > 0 else "CENTER")
         tag = f"{lane_str} // {posture}"
-        cv2.putText(frame_bgr, tag, (w - 135, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.40, ret_color, 1)
+        cv2.putText(frame_bgr, tag, (w - 138, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.40, ret_color, 1)
 
     def _compute_motion_and_pose(
         self,
@@ -328,7 +382,6 @@ class MotionTracker:
         """Run OpenCV absdiff motion detection + human pose tracking."""
         resized = cv2.resize(frame_bgr, (self.width, self.height))
         if not is_sim:
-            # Mirror live webcam so player moving left/right matches screen left/right
             resized = cv2.flip(resized, 1)
 
         gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
@@ -373,7 +426,7 @@ class MotionTracker:
 
         cy = self.height // 2 + 12
         if posture_override == "JUMP":
-            cy = int(self.height * 0.24)
+            cy = int(self.height * 0.22)
         elif posture_override == "CROUCH":
             cy = int(self.height * 0.78)
 
@@ -399,7 +452,6 @@ class MotionTracker:
         )
         return frame
 
-    # Keep backwards-compatible helper signature for unit tests
     def _compute_motion(self, frame_bgr: np.ndarray) -> tuple[float, np.ndarray]:
         score, rgb, bx, by, lane, posture = self._compute_motion_and_pose(
             frame_bgr, True, self._sim_lane_override, self._sim_posture_override

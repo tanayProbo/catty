@@ -117,7 +117,7 @@ class UIRenderer:
 
         # Vertical camera bounce + jump arc + crouch-roll drop
         bounce_px = int(state.cat_bounce_height * 16.0) if state.phase != Phase.FREEZE else 0
-        jump_px = int(state.cat_jump_height * 95.0)
+        jump_px = int(state.cat_jump_height * 135.0)
         crouch_px = -52 if state.is_rolling else 0
 
         # When jumping, camera rises so horizon moves down slightly; when crouching, camera drops close to floor
@@ -380,10 +380,13 @@ class UIRenderer:
             surface.blit(roll_lbl, (ring_cx - roll_lbl.get_width() // 2, h - 78))
         else:
             # Left & Right Bouncing Cat Paws at bottom of POV screen
-            left_paw_y = h - 58 + bounce_y - int(state.cat_jump_height * 30)
-            right_paw_y = h - 58 - bounce_y - int(state.cat_jump_height * 30)
+            left_paw_y = h - 58 + bounce_y - int(state.cat_jump_height * 55)
+            right_paw_y = h - 58 - bounce_y - int(state.cat_jump_height * 55)
             self._draw_pov_paw(surface, cx - 110, left_paw_y)
             self._draw_pov_paw(surface, cx + 110, right_paw_y)
+            if state.cat_jump_height > 0.12:
+                jmp_lbl = self.font_md.render("^^ CAT AIRBORNE // JUMP ACTIVE ^^", True, COLOR_GOLD)
+                surface.blit(jmp_lbl, (cx - jmp_lbl.get_width() // 2, h - 108))
 
     def _draw_pov_paw(self, surface: pygame.Surface, px: int, py: int) -> None:
         paw_rect = pygame.Rect(px - 38, py - 18, 76, 64)

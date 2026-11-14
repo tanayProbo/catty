@@ -101,6 +101,16 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertEqual(sample.human_lane, -1)
         self.assertEqual(sample.human_posture, "CROUCH")
 
+        # Test real CV upward motion impulse jump detection (no override)
+        tracker.set_pose_overrides(lane=None, posture=None)
+        base_frame = tracker._generate_sim_frame(motion_active=False)
+        tracker._compute_motion_and_pose(base_frame, is_sim=False, lane_override=None, posture_override=None)
+        jump_frame = tracker._generate_sim_frame(motion_active=False, posture_override="JUMP")
+        _, _, _, _, _, detected_posture = tracker._compute_motion_and_pose(
+            jump_frame, is_sim=False, lane_override=None, posture_override=None
+        )
+        self.assertEqual(detected_posture, "JUMP")
+
     def test_cat_pov_bounce_jump_crouch_roll_and_obstacles(self) -> None:
         state = GameState()
         state.start_heist()
