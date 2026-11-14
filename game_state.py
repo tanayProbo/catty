@@ -11,14 +11,11 @@ from config import (
     CAT_BOUNCE_FREQ,
     CAT_JUMP_DURATION_SEC,
     CAT_ROLL_DURATION_SEC,
-    CAT_ROLL_SPEED_BOOST_MPS,
     CAT_WALK_SPEED_MPS,
     CLEAR_DURATION_SEC,
     FREEZE_CLEAR_BONUS_MPS,
     HEIST_GOAL_METERS,
     MAX_LEVEL,
-    SWEEP_INTERVAL_MAX,
-    SWEEP_INTERVAL_MIN,
     WARNING_DURATION_SEC,
     GameConfig,
     LevelSpec,
@@ -26,6 +23,7 @@ from config import (
 )
 
 ObstacleKind = Literal["HIGH_GATE", "LOW_BEAM", "SIDE_BLOCK"]
+CoinTier = Literal["FLOOR", "AIR", "LOW_ROLL"]
 
 
 class Phase(str, Enum):
@@ -47,14 +45,30 @@ class CorridorObstacle:
 
 
 @dataclass
+class CorridorCoin:
+    distance_m: float
+    lane: int = 0
+    tier: CoinTier = "FLOOR"
+    collected: bool = False
+
+
+@dataclass
+class ScorePopup:
+    text: str
+    timer: float = 1.0
+    lane: int = 0
+    is_gold: bool = True
+
+
+@dataclass
 class GameState:
     config: GameConfig = field(default_factory=GameConfig)
     phase: Phase = Phase.MENU
 
-    # Level and run progress
     level: int = 1
     level_name: str = "LOBBY VENTS"
     score: int = 0
+    coins: int = 0
     distance_meters: float = 0.0
     goal_meters: float = HEIST_GOAL_METERS
     total_distance_meters: float = 0.0
@@ -64,7 +78,6 @@ class GameState:
     motion_peak: float = 0.0
     current_motion: float = 0.0
 
-    # Cat movement and camera state
     target_lane: int = 0
     cat_lane_pos: float = 0.0
     cat_bounce_height: float = 0.0
@@ -73,13 +86,17 @@ class GameState:
     jump_grace_timer: float = 0.0
     cat_roll_timer: float = 0.0
     cat_roll_angle: float = 0.0
+    crouch_grace_timer: float = 0.0
     is_crouching: bool = False
     action_banner: str = ""
     action_banner_timer: float = 0.0
     busted_reason: str = "MOTION DETECTED ON LASER SWEEP"
 
     obstacles: list[CorridorObstacle] = field(default_factory=list)
+    coins_list: list[CorridorCoin] = field(default_factory=list)
+    popups: list[ScorePopup] = field(default_factory=list)
     next_obstacle_dist: float = 9.0
+    coin_spin_angle: float = 0.0
 
     phase_timer: float = 0.0
     next_sweep_timer: float = 6.5
@@ -103,9 +120,18 @@ class GameState:
     def level_spec(self) -> LevelSpec:
         return get_level_spec(self.level)
 
+    @property
+    def combo_multiplier(self) -> int:
+        return min(5, 1 + (self.streak // 2))
+
     def _emit_sound(self, name: str) -> None:
         if self.on_sound is not None:
             self.on_sound(name)
+
+    def _add_popup(self, text: str, lane: int = 0, is_gold: bool = True) -> None:
+        self.popups.append(ScorePopup(text=text, timer=0.95, lane=lane, is_gold=is_gold))
+        if len(self.popups) > 6:
+            self.popups.pop(0)
 
     def select_starting_level(self, level_num: int) -> None:
         self.config.starting_level = max(1, min(MAX_LEVEL, level_num))
@@ -120,6 +146,7 @@ class GameState:
         self.config.freeze_duration = spec.freeze_duration
         self.distance_meters = 0.0
         self.obstacles = []
+        self.coins_list = []
         self.next_obstacle_dist = 8.0
         self._spawn_obstacles_ahead()
         self.next_sweep_timer = random.uniform(spec.sweep_min_sec, spec.sweep_max_sec)
@@ -128,6 +155,7 @@ class GameState:
         lvl = start_level if start_level is not None else self.config.starting_level
         self.phase = Phase.CREEPING
         self.score = 0
+        self.coins = 0
         self.total_distance_meters = 0.0
         self.streak = 0
         self.max_streak = 0
@@ -143,7 +171,9 @@ class GameState:
         self.jump_grace_timer = 0.0
         self.cat_roll_timer = 0.0
         self.cat_roll_angle = 0.0
+        self.crouch_grace_timer = 0.0
         self.is_crouching = False
+        self.popups = []
         self.busted_reason = "MOTION DETECTED ON LASER SWEEP"
 
         self._apply_level_spec(lvl)
@@ -168,7 +198,7 @@ class GameState:
     def trigger_jump(self) -> None:
         if self.phase not in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             return
-        if self.cat_jump_timer <= 0.22:
+        if self.cat_jump_timer <= 0.24:
             self.cat_jump_timer = CAT_JUMP_DURATION_SEC
             self.cat_jump_height = max(0.38, self.cat_jump_height)
             self.jump_grace_timer = 0.28
@@ -180,7 +210,8 @@ class GameState:
         if self.phase not in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             return
         self.is_crouching = True
-        if self.cat_roll_timer <= 0.10:
+        self.crouch_grace_timer = 0.28
+        if self.cat_roll_timer <= 0.14:
             self.cat_roll_timer = CAT_ROLL_DURATION_SEC
             self.cat_jump_timer = 0.0
             self.cat_jump_height = 0.0
@@ -201,12 +232,28 @@ class GameState:
             if r < 0.42:
                 kind: ObstacleKind = "HIGH_GATE"
                 lane = 0
+                coin_lane = random.choice([-1, 0, 1])
+                self.coins_list.append(
+                    CorridorCoin(distance_m=round(self.next_obstacle_dist, 2), lane=coin_lane, tier="LOW_ROLL")
+                )
             elif r < 0.74:
                 kind = "LOW_BEAM"
                 lane = 0
+                coin_lane = random.choice([-1, 0, 1])
+                self.coins_list.append(
+                    CorridorCoin(distance_m=round(self.next_obstacle_dist, 2), lane=coin_lane, tier="AIR")
+                )
             else:
                 kind = "SIDE_BLOCK"
                 lane = random.choice([-1, 0, 1])
+                open_lanes = [l for l in (-1, 0, 1) if l != lane]
+                self.coins_list.append(
+                    CorridorCoin(
+                        distance_m=round(self.next_obstacle_dist, 2),
+                        lane=random.choice(open_lanes),
+                        tier="FLOOR",
+                    )
+                )
 
             self.obstacles.append(
                 CorridorObstacle(
@@ -215,7 +262,17 @@ class GameState:
                     lane=lane,
                 )
             )
-            self.next_obstacle_dist += random.uniform(spec.obstacle_gap_min, spec.obstacle_gap_max)
+
+            gap = random.uniform(spec.obstacle_gap_min, spec.obstacle_gap_max)
+            # Spawn a mini trail of floor coins between obstacles
+            trail_lane = random.choice([-1, 0, 1])
+            mid_start = self.next_obstacle_dist + gap * 0.34
+            for step in range(2):
+                cdist = round(mid_start + step * 1.6, 2)
+                if cdist < self.goal_meters - 2.5:
+                    self.coins_list.append(CorridorCoin(distance_m=cdist, lane=trail_lane, tier="FLOOR"))
+
+            self.next_obstacle_dist += gap
 
     def update(
         self,
@@ -234,6 +291,11 @@ class GameState:
             self.flash_timer = max(0.0, self.flash_timer - dt)
         if self.action_banner_timer > 0.0:
             self.action_banner_timer = max(0.0, self.action_banner_timer - dt)
+
+        self.coin_spin_angle = (self.coin_spin_angle + dt * 260.0) % 360.0
+        for p in self.popups:
+            p.timer -= dt
+        self.popups = [p for p in self.popups if p.timer > 0.0]
 
         if human_lane is not None and self.phase in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             self.set_target_lane(human_lane)
@@ -265,7 +327,7 @@ class GameState:
         self.laser_sweep_offset = (self.laser_sweep_offset + dt * 1.4) % 1.0
 
         lane_diff = float(self.target_lane) - self.cat_lane_pos
-        self.cat_lane_pos += lane_diff * min(1.0, dt * 11.0)
+        self.cat_lane_pos += lane_diff * min(1.0, dt * 12.5)
 
         if self.cat_jump_timer > 0.0:
             self.cat_jump_timer = max(0.0, self.cat_jump_timer - dt)
@@ -281,8 +343,11 @@ class GameState:
             self.cat_roll_timer = max(0.0, self.cat_roll_timer - dt)
             prog = 1.0 - (self.cat_roll_timer / CAT_ROLL_DURATION_SEC)
             self.cat_roll_angle = (prog * 360.0) % 360.0
+            self.crouch_grace_timer = 0.25
         else:
             self.cat_roll_angle = 0.0
+            if self.crouch_grace_timer > 0.0:
+                self.crouch_grace_timer = max(0.0, self.crouch_grace_timer - dt)
 
         spec = self.level_spec
 
@@ -290,6 +355,7 @@ class GameState:
             speed = spec.roll_speed_mps if self.is_rolling else spec.walk_speed_mps
             self._advance_cat(dt, speed)
             self._spawn_obstacles_ahead()
+            self._check_coins()
             if human_lane is not None or human_posture is not None:
                 self._check_obstacles(is_simulation)
             if self.phase == Phase.BUSTED:
@@ -319,6 +385,7 @@ class GameState:
         elif self.phase == Phase.CLEAR:
             self._advance_cat(dt, max(FREEZE_CLEAR_BONUS_MPS, spec.walk_speed_mps + 2.2))
             self._spawn_obstacles_ahead()
+            self._check_coins()
             if human_lane is not None or human_posture is not None:
                 self._check_obstacles(is_simulation)
             if self.phase == Phase.BUSTED:
@@ -331,15 +398,42 @@ class GameState:
                 self.phase = Phase.CREEPING
                 self.next_sweep_timer = random.uniform(spec.sweep_min_sec, spec.sweep_max_sec)
 
+    def _check_coins(self) -> None:
+        for coin in self.coins_list:
+            if coin.collected:
+                continue
+            rel = coin.distance_m - self.distance_meters
+            if -0.55 <= rel <= 0.65:
+                lane_ok = (
+                    abs(self.cat_lane_pos - float(coin.lane)) <= 0.65
+                    or self.target_lane == coin.lane
+                )
+                if not lane_ok:
+                    continue
+                if coin.tier == "AIR" and not (self.cat_jump_height > 0.12 or self.cat_jump_timer > 0.0):
+                    continue
+                if coin.tier == "LOW_ROLL" and not (self.is_rolling or self.crouch_grace_timer > 0.0):
+                    continue
+
+                coin.collected = True
+                self.coins += 1
+                pts = 50 * self.combo_multiplier
+                self.score += pts
+                self._add_popup(f"+{pts} COIN", lane=coin.lane, is_gold=True)
+                self._emit_sound("coin")
+            elif rel < -0.65:
+                coin.collected = True
+
     def _complete_sector_or_heist(self, is_simulation: bool) -> None:
         if self.level < MAX_LEVEL:
-            bonus = 400 + self.level * 100
+            bonus = (400 + self.level * 100) * self.combo_multiplier
             self.score += bonus
             next_lvl = self.level + 1
             self._apply_level_spec(next_lvl)
             self.phase = Phase.CREEPING
             self.action_banner = f"SECTOR CLEAR! +{bonus} -> LEVEL {self.level:02d}: {self.level_name}"
             self.action_banner_timer = 3.0
+            self._add_popup(f"LVL {self.level:02d} +{bonus}", lane=0, is_gold=True)
             self._emit_sound("level_up")
         else:
             self._trigger_victory(is_simulation)
@@ -351,13 +445,15 @@ class GameState:
             rel = obs.distance_m - self.distance_meters
             if -0.45 <= rel <= 0.55:
                 if obs.kind == "HIGH_GATE":
-                    if self.is_rolling or self.is_crouching:
+                    if self.is_rolling or self.is_crouching or self.crouch_grace_timer > 0.0:
                         obs.cleared = True
-                        self.score += 150
                         self.streak += 1
                         self.max_streak = max(self.max_streak, self.streak)
-                        self.action_banner = "ROLLED UNDER LASER GATE +150"
+                        pts = 150 * self.combo_multiplier
+                        self.score += pts
+                        self.action_banner = f"ROLLED UNDER LASER GATE +{pts} (x{self.combo_multiplier})"
                         self.action_banner_timer = 1.4
+                        self._add_popup(f"ROLL +{pts}", lane=self.target_lane, is_gold=False)
                         self._emit_sound("dodge")
                     else:
                         obs.cleared = True
@@ -372,11 +468,13 @@ class GameState:
                         or self.jump_grace_timer > 0.0
                     ):
                         obs.cleared = True
-                        self.score += 150
                         self.streak += 1
                         self.max_streak = max(self.max_streak, self.streak)
-                        self.action_banner = "JUMPED OVER FLOOR LASER +150"
+                        pts = 150 * self.combo_multiplier
+                        self.score += pts
+                        self.action_banner = f"JUMPED OVER FLOOR LASER +{pts} (x{self.combo_multiplier})"
                         self.action_banner_timer = 1.4
+                        self._add_popup(f"JUMP +{pts}", lane=self.target_lane, is_gold=False)
                         self._emit_sound("dodge")
                     else:
                         obs.cleared = True
@@ -391,11 +489,13 @@ class GameState:
                         or self.cat_jump_height > 0.45
                     ):
                         obs.cleared = True
-                        self.score += 120
                         self.streak += 1
                         self.max_streak = max(self.max_streak, self.streak)
-                        self.action_banner = "DODGED SECURITY PYLON +120"
+                        pts = 120 * self.combo_multiplier
+                        self.score += pts
+                        self.action_banner = f"DODGED SECURITY PYLON +{pts} (x{self.combo_multiplier})"
                         self.action_banner_timer = 1.2
+                        self._add_popup(f"DODGE +{pts}", lane=self.target_lane, is_gold=False)
                         self._emit_sound("dodge")
                     else:
                         obs.cleared = True
@@ -409,7 +509,7 @@ class GameState:
         delta_m = speed_mps * dt
         self.distance_meters = min(self.goal_meters, self.distance_meters + delta_m)
         self.total_distance_meters += delta_m
-        self.score += int(round(delta_m * (22.0 + self.level * 3.0)))
+        self.score += int(round(delta_m * (22.0 + self.level * 3.0) * self.combo_multiplier))
         self.walk_cycle += dt * CAT_BOUNCE_FREQ * (speed_mps / CAT_WALK_SPEED_MPS)
         self.cat_bounce_height = abs(math.sin(self.walk_cycle))
         self.step_sound_timer -= dt
@@ -442,7 +542,9 @@ class GameState:
         self.streak += 1
         if self.streak > self.max_streak:
             self.max_streak = self.streak
-        self.score += 250 + (self.streak * 50)
+        pts = (250 + (self.streak * 50)) * self.combo_multiplier
+        self.score += pts
+        self._add_popup(f"FREEZE CLEAR +{pts}", lane=self.target_lane, is_gold=True)
         self._emit_sound("clear")
         self.telemetry.append(
             TelemetryEventIn(
@@ -472,7 +574,7 @@ class GameState:
     def _trigger_victory(self, is_simulation: bool) -> None:
         self.phase = Phase.VICTORY
         self.distance_meters = self.goal_meters
-        self.score += 1500
+        self.score += 1500 + self.coins * 100
         self._emit_sound("victory")
         self.telemetry.append(
             TelemetryEventIn(

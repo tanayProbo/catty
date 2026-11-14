@@ -53,21 +53,25 @@ class MotionTracker:
         self._is_simulation = force_simulation
         self._status_label = "STARTING"
         self._prev_gray: Optional[np.ndarray] = None
+        self._bg_float: Optional[np.ndarray] = None
         self._latest_rgb: np.ndarray = self._blank_frame()
         self._motion_score: float = 0.0
         self._sim_motion_trigger: bool = False
         self._sim_phase: float = 0.0
         self._consecutive_failures: int = 0
 
-        self._face_cascade = self._load_face_cascade()
-        self._smoothed_x: float = 0.5
+        self._face_cascade = self._load_cascade("haarcascade_frontalface_default.xml")
+        self._smoothed_x: float = 0.50
         self._smoothed_y: float = 0.50
+        self._prev_raw_x: float = 0.50
         self._prev_raw_y: float = 0.50
         self._neutral_y: float = 0.50
         self._human_lane: int = 0
         self._human_posture: PostureType = "STAND"
         self._jump_hold_until: float = 0.0
+        self._crouch_hold_until: float = 0.0
         self._crouch_suppress_until: float = 0.0
+        self._jump_suppress_until: float = 0.0
 
         self._sim_lane_override: Optional[int] = None
         self._sim_posture_override: Optional[PostureType] = None
@@ -76,11 +80,11 @@ class MotionTracker:
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
-    def _load_face_cascade(self) -> Optional[cv2.CascadeClassifier]:
+    def _load_cascade(self, filename: str) -> Optional[cv2.CascadeClassifier]:
         try:
             cascade_dir = getattr(cv2, "data", None)
             if cascade_dir is not None:
-                xml_path = os.path.join(cascade_dir.haarcascades, "haarcascade_frontalface_default.xml")
+                xml_path = os.path.join(cascade_dir.haarcascades, filename)
                 if os.path.exists(xml_path):
                     classifier = cv2.CascadeClassifier(xml_path)
                     if not classifier.empty():
@@ -129,6 +133,7 @@ class MotionTracker:
                     self._status_label = "WEBCAM LIVE"
                     self._consecutive_failures = 0
                     self._prev_gray = None
+                    self._bg_float = None
                     return
             if cap is not None:
                 cap.release()
@@ -139,6 +144,7 @@ class MotionTracker:
         self._is_simulation = True
         self._status_label = "NO CAMERA (SIM)"
         self._prev_gray = None
+        self._bg_float = None
 
     def _release_camera(self) -> None:
         if self._cap is not None:
@@ -152,6 +158,7 @@ class MotionTracker:
         with self._lock:
             self._force_simulation = enabled
             self._prev_gray = None
+            self._bg_float = None
             self._motion_score = 0.0
             if enabled:
                 self._release_camera()
@@ -172,11 +179,15 @@ class MotionTracker:
         with self._lock:
             self._sim_lane_override = lane
             self._sim_posture_override = posture
+            if posture is None:
+                self._crouch_hold_until = 0.0
+                self._jump_suppress_until = 0.0
 
     def calibrate_neutral(self) -> None:
         with self._lock:
             self._neutral_y = max(0.32, min(0.68, self._smoothed_y))
             self._jump_hold_until = 0.0
+            self._crouch_hold_until = 0.0
 
     def reset_reference(self) -> None:
         with self._lock:
@@ -186,6 +197,7 @@ class MotionTracker:
     def _detect_human_pose(
         self,
         gray: np.ndarray,
+        blurred: np.ndarray,
         delta: Optional[np.ndarray],
         is_sim: bool,
         lane_override: Optional[int],
@@ -196,6 +208,7 @@ class MotionTracker:
         target_y = self._smoothed_y
         detected = False
         upward_impulse_jump = False
+        downward_impulse_crouch = False
 
         if not is_sim:
             face_found = False
@@ -203,48 +216,68 @@ class MotionTracker:
                 try:
                     faces = self._face_cascade.detectMultiScale(
                         gray,
-                        scaleFactor=1.15,
+                        scaleFactor=1.14,
                         minNeighbors=3,
-                        minSize=(24, 24),
+                        minSize=(22, 22),
                     )
                     if len(faces) > 0:
                         fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
                         target_x = float(fx + fw * 0.5) / float(self.width)
-                        target_y = float(fy + fh * 0.45) / float(self.height)
+                        target_y = float(fy + fh * 0.44) / float(self.height)
                         detected = True
                         face_found = True
                 except Exception:
                     pass
 
+            # Combine frame delta and adaptive background silhouette for reliable full-body tracking
+            if self._bg_float is None or self._bg_float.shape != blurred.shape:
+                self._bg_float = blurred.astype(np.float32)
+            else:
+                cv2.accumulateWeighted(blurred, self._bg_float, 0.025)
+
             if delta is not None:
-                _, mask = cv2.threshold(delta, 18, 255, cv2.THRESH_BINARY)
-                ys, xs = np.nonzero(mask)
-                if len(ys) > 35:
-                    motion_x = float(np.mean(xs)) / float(self.width)
-                    top_crown_y = float(np.percentile(ys, 18)) / float(self.height)
-                    bottom_y = float(np.percentile(ys, 85)) / float(self.height)
+                _, motion_mask = cv2.threshold(delta, 16, 255, cv2.THRESH_BINARY)
+                ys, xs = np.nonzero(motion_mask)
+                if len(ys) > 30:
+                    # Use median X so a single waving hand doesn't pull the lane center away from the torso
+                    motion_x = float(np.median(xs)) / float(self.width)
+                    top_crown_y = float(np.percentile(ys, 16)) / float(self.height)
+                    bottom_y = float(np.percentile(ys, 84)) / float(self.height)
+                    median_y = float(np.median(ys)) / float(self.height)
 
                     upper_zone_cutoff = int(self.height * 0.38)
+                    lower_zone_start = int(self.height * 0.62)
                     upper_active_pct = (
-                        float(np.count_nonzero(mask[:upper_zone_cutoff, :]))
+                        float(np.count_nonzero(motion_mask[:upper_zone_cutoff, :]))
                         / float(max(1, upper_zone_cutoff * self.width))
+                    ) * 100.0
+                    lower_active_pct = (
+                        float(np.count_nonzero(motion_mask[lower_zone_start:, :]))
+                        / float(max(1, (self.height - lower_zone_start) * self.width))
                     ) * 100.0
 
                     if not face_found:
                         target_x = motion_x
-                        if bottom_y > 0.72 and top_crown_y > 0.48:
-                            target_y = float(np.mean(ys)) / float(self.height)
+                        if lower_active_pct > upper_active_pct * 1.45 and top_crown_y > self._neutral_y - 0.02:
+                            target_y = max(median_y, bottom_y - 0.06)
                         else:
-                            target_y = min(self._smoothed_y, top_crown_y + 0.06)
+                            target_y = min(self._smoothed_y, top_crown_y + 0.05)
                         detected = True
                     else:
-                        target_y = min(target_y, top_crown_y + 0.05)
+                        target_x = target_x * 0.72 + motion_x * 0.28
+                        if top_crown_y + 0.04 < target_y:
+                            target_y = top_crown_y + 0.04
 
                     vy = target_y - self._prev_raw_y
-                    if (vy < -0.032 and top_crown_y < self._neutral_y - 0.04) or (
-                        upper_active_pct > 4.2 and top_crown_y < self._neutral_y - 0.05
+                    if (vy < -0.026 and top_crown_y < self._neutral_y - 0.03) or (
+                        upper_active_pct > 3.6 and top_crown_y < self._neutral_y - 0.04
                     ):
                         upward_impulse_jump = True
+                    elif now >= self._crouch_suppress_until and (
+                        (vy > 0.026 and median_y > self._neutral_y + 0.04)
+                        or (lower_active_pct > 4.2 and top_crown_y > self._neutral_y + 0.03)
+                    ):
+                        downward_impulse_crouch = True
 
         if lane_override is not None:
             target_x = 0.20 if lane_override < 0 else (0.80 if lane_override > 0 else 0.50)
@@ -258,49 +291,74 @@ class MotionTracker:
                 upward_impulse_jump = True
             elif posture_override == "CROUCH":
                 target_y = 0.80
+                downward_impulse_crouch = True
             else:
                 target_y = self._neutral_y
             detected = True
         elif is_sim:
             target_y = self._neutral_y
 
+        vx = 0.0
         if detected or is_sim:
+            vx = target_x - self._prev_raw_x
+            self._prev_raw_x = target_x
             self._prev_raw_y = target_y
-            self._smoothed_x = self._smoothed_x * 0.50 + target_x * 0.50
+            # Fast horizontal tracking so side-steps respond right away
+            self._smoothed_x = self._smoothed_x * 0.34 + target_x * 0.66
             if target_y < self._smoothed_y:
-                self._smoothed_y = self._smoothed_y * 0.18 + target_y * 0.82
+                self._smoothed_y = self._smoothed_y * 0.16 + target_y * 0.84
             else:
-                self._smoothed_y = self._smoothed_y * 0.45 + target_y * 0.55
+                self._smoothed_y = self._smoothed_y * 0.28 + target_y * 0.72
 
+        # Horizontal lane classification with deadzone hysteresis so lanes don't flicker
         if lane_override is not None:
             lane = lane_override
-        elif self._smoothed_x < CV_LEFT_X_THRESHOLD:
-            lane = -1
-        elif self._smoothed_x > CV_RIGHT_X_THRESHOLD:
-            lane = 1
         else:
-            lane = 0
+            prev_lane = self._human_lane
+            left_enter = CV_LEFT_X_THRESHOLD + 0.02
+            left_exit = CV_LEFT_X_THRESHOLD + 0.055
+            right_enter = CV_RIGHT_X_THRESHOLD - 0.02
+            right_exit = CV_RIGHT_X_THRESHOLD - 0.055
 
-        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.075))
-        crouch_thresh = min(0.82, max(CV_CROUCH_Y_THRESHOLD, self._neutral_y + 0.105))
+            if self._smoothed_x < left_enter or (vx < -0.042 and self._smoothed_x < 0.45):
+                lane = -1
+            elif self._smoothed_x > right_enter or (vx > 0.042 and self._smoothed_x > 0.55):
+                lane = 1
+            elif prev_lane == -1 and self._smoothed_x < left_exit:
+                lane = -1
+            elif prev_lane == 1 and self._smoothed_x > right_exit:
+                lane = 1
+            else:
+                lane = 0
+
+        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.068))
+        crouch_thresh = min(0.80, max(CV_CROUCH_Y_THRESHOLD - 0.03, self._neutral_y + 0.078))
 
         if posture_override is not None:
             posture: PostureType = posture_override
             if posture == "JUMP":
-                self._jump_hold_until = now + 0.35
-                self._crouch_suppress_until = now + 0.60
+                self._jump_hold_until = now + 0.36
+                self._crouch_suppress_until = now + 0.62
+            elif posture == "CROUCH":
+                self._crouch_hold_until = now + 0.40
+                self._jump_suppress_until = now + 0.55
         elif upward_impulse_jump or self._smoothed_y < jump_thresh:
             posture = "JUMP"
             self._jump_hold_until = now + 0.38
-            self._crouch_suppress_until = now + 0.68
+            self._crouch_hold_until = 0.0
+            self._crouch_suppress_until = now + 0.65
         elif now < self._jump_hold_until:
             posture = "JUMP"
-        elif self._smoothed_y > crouch_thresh and now >= self._crouch_suppress_until:
+        elif now >= self._crouch_suppress_until and (downward_impulse_crouch or self._smoothed_y > crouch_thresh):
+            posture = "CROUCH"
+            self._crouch_hold_until = now + 0.42
+            self._jump_suppress_until = now + 0.58
+        elif now < self._crouch_hold_until:
             posture = "CROUCH"
         else:
             posture = "STAND"
-            if not is_sim and detected and abs(self._smoothed_y - self._neutral_y) < 0.06:
-                self._neutral_y = self._neutral_y * 0.98 + self._smoothed_y * 0.02
+            if not is_sim and detected and abs(self._smoothed_y - self._neutral_y) < 0.055:
+                self._neutral_y = self._neutral_y * 0.97 + self._smoothed_y * 0.03
 
         return self._smoothed_x, self._smoothed_y, lane, posture
 
@@ -313,13 +371,13 @@ class MotionTracker:
         posture: PostureType,
     ) -> None:
         w, h = self.width, self.height
-        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.075))
-        crouch_thresh = min(0.82, max(CV_CROUCH_Y_THRESHOLD, self._neutral_y + 0.105))
+        jump_thresh = max(0.18, min(CV_JUMP_Y_THRESHOLD, self._neutral_y - 0.068))
+        crouch_thresh = min(0.80, max(CV_CROUCH_Y_THRESHOLD - 0.03, self._neutral_y + 0.078))
 
         jump_y = int(h * jump_thresh)
         crouch_y = int(h * crouch_thresh)
-        left_x = int(w * CV_LEFT_X_THRESHOLD)
-        right_x = int(w * CV_RIGHT_X_THRESHOLD)
+        left_x = int(w * (CV_LEFT_X_THRESHOLD + 0.02))
+        right_x = int(w * (CV_RIGHT_X_THRESHOLD - 0.02))
 
         cv2.line(frame_bgr, (0, jump_y), (w, jump_y), (0, 220, 255), 2 if posture == "JUMP" else 1)
         cv2.line(frame_bgr, (0, crouch_y), (w, crouch_y), (255, 200, 0), 2 if posture == "CROUCH" else 1)
@@ -365,12 +423,13 @@ class MotionTracker:
             _, thresh = cv2.threshold(delta, 20, 255, cv2.THRESH_BINARY)
             changed_pct = (float(np.count_nonzero(thresh)) / float(thresh.size)) * 100.0
             mean_delta = float(np.mean(delta))
-            score = min(100.0, (changed_pct * 1.4) + (mean_delta * 0.6))
+            raw_score = min(100.0, (changed_pct * 1.4) + (mean_delta * 0.6))
+            score = raw_score if is_sim else (self._motion_score * 0.25 + raw_score * 0.75)
 
         self._prev_gray = blurred
 
         bx, by, lane, posture = self._detect_human_pose(
-            gray, delta, is_sim, lane_override, posture_override
+            gray, blurred, delta, is_sim, lane_override, posture_override
         )
         self._draw_pose_hud_on_frame(resized, bx, by, lane, posture)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -461,6 +520,7 @@ class MotionTracker:
                         self._is_simulation = True
                         self._status_label = "CAMERA LOST (SIM)"
                         self._prev_gray = None
+                        self._bg_float = None
                     sim_mode = True
                     frame_bgr = self._generate_sim_frame(sim_motion, lane_ovr, posture_ovr)
             else:
