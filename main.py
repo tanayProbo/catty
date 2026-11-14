@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from typing import Optional
 import pygame
 
@@ -77,10 +78,14 @@ def main() -> int:
     )
 
     kb_lane: Optional[int] = None
+    kb_lane_until: float = 0.0
+    kb_posture: Optional[PostureType] = None
+    kb_posture_until: float = 0.0
     running = True
     try:
         while running:
             dt = clock.tick(TARGET_FPS) / 1000.0
+            now = time.perf_counter()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -113,11 +118,13 @@ def main() -> int:
                             state.show_leaderboard = False
                         elif state.phase in (Phase.MENU, Phase.BUSTED, Phase.VICTORY):
                             kb_lane = None
+                            kb_posture = None
                             state.start_heist()
 
                     elif event.key == pygame.K_r:
                         if state.phase in (Phase.BUSTED, Phase.VICTORY):
                             kb_lane = None
+                            kb_posture = None
                             state.start_heist()
 
                     elif event.key in LEVEL_KEY_MAP:
@@ -125,6 +132,7 @@ def main() -> int:
                         state.select_starting_level(chosen)
                         if state.phase not in (Phase.MENU, Phase.BUSTED, Phase.VICTORY):
                             kb_lane = None
+                            kb_posture = None
                             state.start_heist(start_level=chosen)
 
                     elif event.key == pygame.K_MINUS:
@@ -134,19 +142,26 @@ def main() -> int:
                         state.select_starting_level(min(MAX_LEVEL, state.config.starting_level + 1))
 
                     elif event.key in (pygame.K_w, pygame.K_UP, pygame.K_SPACE):
-                        if state.phase != Phase.FREEZE:
-                            state.trigger_jump()
+                        if state.phase in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
+                            state.trigger_jump(force=True)
+                            kb_posture = "JUMP"
+                            kb_posture_until = now + 0.35
 
                     elif event.key in (pygame.K_s, pygame.K_DOWN):
-                        state.trigger_crouch_roll()
+                        if state.phase in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
+                            state.trigger_crouch_roll(force=True)
+                            kb_posture = "CROUCH"
+                            kb_posture_until = now + 0.38
 
                     elif event.key in (pygame.K_a, pygame.K_LEFT):
                         state.shift_lane(-1)
                         kb_lane = state.target_lane
+                        kb_lane_until = now + 2.5
 
                     elif event.key in (pygame.K_d, pygame.K_RIGHT):
                         state.shift_lane(1)
                         kb_lane = state.target_lane
+                        kb_lane_until = now + 2.5
 
                     elif event.key == pygame.K_c:
                         tracker.calibrate_neutral()
@@ -169,21 +184,33 @@ def main() -> int:
             keys = pygame.key.get_pressed()
             tracker.set_simulated_motion(bool(keys[pygame.K_SPACE]))
 
-            posture_ovr: Optional[PostureType] = None
-            if keys[pygame.K_w] or keys[pygame.K_UP] or (keys[pygame.K_SPACE] and state.phase != Phase.FREEZE):
-                posture_ovr = "JUMP"
-            elif keys[pygame.K_s] or keys[pygame.K_DOWN]:
-                posture_ovr = "CROUCH"
-            tracker.set_pose_overrides(kb_lane, posture_ovr)
+            if state.phase in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
+                if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+                    kb_posture = "CROUCH"
+                    kb_posture_until = max(kb_posture_until, now + 0.15)
+                elif keys[pygame.K_w] or keys[pygame.K_UP] or keys[pygame.K_SPACE]:
+                    kb_posture = "JUMP"
+                    kb_posture_until = max(kb_posture_until, now + 0.15)
+                elif now >= kb_posture_until:
+                    kb_posture = None
+            else:
+                kb_posture = None
 
             cv_sample = tracker.get_sample()
-            active_lane = kb_lane if (kb_lane is not None and cv_sample.is_simulation) else cv_sample.human_lane
+            if not cv_sample.is_simulation and kb_lane is not None and now >= kb_lane_until:
+                kb_lane = None
+
+            tracker.set_pose_overrides(kb_lane, kb_posture)
+            cv_sample = tracker.get_sample()
+
+            active_lane = kb_lane if kb_lane is not None else cv_sample.human_lane
+            active_posture: str = kb_posture if kb_posture is not None else cv_sample.human_posture
             state.update(
                 dt,
                 cv_sample.motion_score,
                 cv_sample.is_simulation,
                 human_lane=active_lane,
-                human_posture=cv_sample.human_posture,
+                human_posture=active_posture,
             )
 
             leaderboard, stats, api_online = backend.get_snapshot()
