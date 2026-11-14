@@ -24,6 +24,7 @@ from config import (
 
 ObstacleKind = Literal["HIGH_GATE", "LOW_BEAM", "SIDE_BLOCK"]
 CoinTier = Literal["FLOOR", "AIR", "LOW_ROLL"]
+MAX_TELEMETRY_EVENTS = 128
 
 
 class Phase(str, Enum):
@@ -36,7 +37,7 @@ class Phase(str, Enum):
     VICTORY = "VICTORY"
 
 
-@dataclass
+@dataclass(slots=True)
 class CorridorObstacle:
     kind: ObstacleKind
     distance_m: float
@@ -44,7 +45,7 @@ class CorridorObstacle:
     cleared: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class CorridorCoin:
     distance_m: float
     lane: int = 0
@@ -52,7 +53,7 @@ class CorridorCoin:
     collected: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class ScorePopup:
     text: str
     timer: float = 1.0
@@ -60,7 +61,7 @@ class ScorePopup:
     is_gold: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class GameState:
     config: GameConfig = field(default_factory=GameConfig)
     phase: Phase = Phase.MENU
@@ -128,10 +129,22 @@ class GameState:
         if self.on_sound is not None:
             self.on_sound(name)
 
+    def _record_telemetry(self, event_type: str, motion_val: float) -> None:
+        if len(self.telemetry) >= MAX_TELEMETRY_EVENTS:
+            self.telemetry.pop(0)
+        self.telemetry.append(
+            TelemetryEventIn(
+                event_type=event_type,  # type: ignore[arg-type]
+                motion_delta=motion_val,
+                heist_distance=self.total_distance_meters or self.distance_meters,
+                elapsed_sec=self.elapsed_sec,
+            )
+        )
+
     def _add_popup(self, text: str, lane: int = 0, is_gold: bool = True) -> None:
-        self.popups.append(ScorePopup(text=text, timer=0.95, lane=lane, is_gold=is_gold))
-        if len(self.popups) > 6:
+        if len(self.popups) >= 6:
             self.popups.pop(0)
+        self.popups.append(ScorePopup(text=text, timer=0.95, lane=lane, is_gold=is_gold))
 
     def select_starting_level(self, level_num: int) -> None:
         self.config.starting_level = max(1, min(MAX_LEVEL, level_num))
@@ -145,8 +158,8 @@ class GameState:
         self.goal_meters = spec.goal_meters
         self.config.freeze_duration = spec.freeze_duration
         self.distance_meters = 0.0
-        self.obstacles = []
-        self.coins_list = []
+        self.obstacles.clear()
+        self.coins_list.clear()
         self.next_obstacle_dist = 8.0
         self._spawn_obstacles_ahead()
         self.next_sweep_timer = random.uniform(spec.sweep_min_sec, spec.sweep_max_sec)
@@ -173,7 +186,7 @@ class GameState:
         self.cat_roll_angle = 0.0
         self.crouch_grace_timer = 0.0
         self.is_crouching = False
-        self.popups = []
+        self.popups.clear()
         self.busted_reason = "MOTION DETECTED ON LASER SWEEP"
 
         self._apply_level_spec(lvl)
@@ -186,7 +199,7 @@ class GameState:
         self.flash_timer = 0.0
         self.cat_chase_offset = 0.0
         self.dog_chase_x = -0.22
-        self.telemetry = []
+        self.telemetry.clear()
         self.run_submitted = False
         self.show_leaderboard = False
 
@@ -224,6 +237,12 @@ class GameState:
         self.target_lane = max(-1, min(1, self.target_lane + delta))
 
     def _spawn_obstacles_ahead(self) -> None:
+        cutoff = self.distance_meters - 2.0
+        if len(self.obstacles) > 24:
+            self.obstacles = [o for o in self.obstacles if not o.cleared and o.distance_m >= cutoff]
+        if len(self.coins_list) > 36:
+            self.coins_list = [c for c in self.coins_list if not c.collected and c.distance_m >= cutoff]
+
         spec = self.level_spec
         while self.next_obstacle_dist < self.goal_meters - 4.0 and (
             self.next_obstacle_dist - self.distance_meters
@@ -232,21 +251,21 @@ class GameState:
             if r < 0.42:
                 kind: ObstacleKind = "HIGH_GATE"
                 lane = 0
-                coin_lane = random.choice([-1, 0, 1])
+                coin_lane = random.choice((-1, 0, 1))
                 self.coins_list.append(
                     CorridorCoin(distance_m=round(self.next_obstacle_dist, 2), lane=coin_lane, tier="LOW_ROLL")
                 )
             elif r < 0.74:
                 kind = "LOW_BEAM"
                 lane = 0
-                coin_lane = random.choice([-1, 0, 1])
+                coin_lane = random.choice((-1, 0, 1))
                 self.coins_list.append(
                     CorridorCoin(distance_m=round(self.next_obstacle_dist, 2), lane=coin_lane, tier="AIR")
                 )
             else:
                 kind = "SIDE_BLOCK"
-                lane = random.choice([-1, 0, 1])
-                open_lanes = [l for l in (-1, 0, 1) if l != lane]
+                lane = random.choice((-1, 0, 1))
+                open_lanes = tuple(l for l in (-1, 0, 1) if l != lane)
                 self.coins_list.append(
                     CorridorCoin(
                         distance_m=round(self.next_obstacle_dist, 2),
@@ -264,8 +283,7 @@ class GameState:
             )
 
             gap = random.uniform(spec.obstacle_gap_min, spec.obstacle_gap_max)
-            # Spawn a mini trail of floor coins between obstacles
-            trail_lane = random.choice([-1, 0, 1])
+            trail_lane = random.choice((-1, 0, 1))
             mid_start = self.next_obstacle_dist + gap * 0.34
             for step in range(2):
                 cdist = round(mid_start + step * 1.6, 2)
@@ -293,9 +311,10 @@ class GameState:
             self.action_banner_timer = max(0.0, self.action_banner_timer - dt)
 
         self.coin_spin_angle = (self.coin_spin_angle + dt * 260.0) % 360.0
-        for p in self.popups:
-            p.timer -= dt
-        self.popups = [p for p in self.popups if p.timer > 0.0]
+        if self.popups:
+            for p in self.popups:
+                p.timer -= dt
+            self.popups = [p for p in self.popups if p.timer > 0.0]
 
         if human_lane is not None and self.phase in (Phase.CREEPING, Phase.WARNING, Phase.CLEAR):
             self.set_target_lane(human_lane)
@@ -399,30 +418,34 @@ class GameState:
                 self.next_sweep_timer = random.uniform(spec.sweep_min_sec, spec.sweep_max_sec)
 
     def _check_coins(self) -> None:
+        dist = self.distance_meters
         for coin in self.coins_list:
             if coin.collected:
                 continue
-            rel = coin.distance_m - self.distance_meters
-            if -0.55 <= rel <= 0.65:
-                lane_ok = (
-                    abs(self.cat_lane_pos - float(coin.lane)) <= 0.65
-                    or self.target_lane == coin.lane
-                )
-                if not lane_ok:
-                    continue
-                if coin.tier == "AIR" and not (self.cat_jump_height > 0.12 or self.cat_jump_timer > 0.0):
-                    continue
-                if coin.tier == "LOW_ROLL" and not (self.is_rolling or self.crouch_grace_timer > 0.0):
-                    continue
+            rel = coin.distance_m - dist
+            if rel > 0.65:
+                continue
+            if rel < -0.55:
+                coin.collected = True
+                continue
 
-                coin.collected = True
-                self.coins += 1
-                pts = 50 * self.combo_multiplier
-                self.score += pts
-                self._add_popup(f"+{pts} COIN", lane=coin.lane, is_gold=True)
-                self._emit_sound("coin")
-            elif rel < -0.65:
-                coin.collected = True
+            lane_ok = (
+                abs(self.cat_lane_pos - float(coin.lane)) <= 0.65
+                or self.target_lane == coin.lane
+            )
+            if not lane_ok:
+                continue
+            if coin.tier == "AIR" and not (self.cat_jump_height > 0.12 or self.cat_jump_timer > 0.0):
+                continue
+            if coin.tier == "LOW_ROLL" and not (self.is_rolling or self.crouch_grace_timer > 0.0):
+                continue
+
+            coin.collected = True
+            self.coins += 1
+            pts = 50 * self.combo_multiplier
+            self.score += pts
+            self._add_popup(f"+{pts} COIN", lane=coin.lane, is_gold=True)
+            self._emit_sound("coin")
 
     def _complete_sector_or_heist(self, is_simulation: bool) -> None:
         if self.level < MAX_LEVEL:
@@ -439,71 +462,75 @@ class GameState:
             self._trigger_victory(is_simulation)
 
     def _check_obstacles(self, is_simulation: bool) -> None:
+        dist = self.distance_meters
         for obs in self.obstacles:
             if obs.cleared:
                 continue
-            rel = obs.distance_m - self.distance_meters
-            if -0.45 <= rel <= 0.55:
-                if obs.kind == "HIGH_GATE":
-                    if self.is_rolling or self.is_crouching or self.crouch_grace_timer > 0.0:
-                        obs.cleared = True
-                        self.streak += 1
-                        self.max_streak = max(self.max_streak, self.streak)
-                        pts = 150 * self.combo_multiplier
-                        self.score += pts
-                        self.action_banner = f"ROLLED UNDER LASER GATE +{pts} (x{self.combo_multiplier})"
-                        self.action_banner_timer = 1.4
-                        self._add_popup(f"ROLL +{pts}", lane=self.target_lane, is_gold=False)
-                        self._emit_sound("dodge")
-                    else:
-                        obs.cleared = True
-                        self.busted_reason = "HIT HIGH LASER GATE (CROUCH TO ROLL UNDER)"
-                        self._trigger_busted(self.current_motion, is_simulation)
-                        return
-
-                elif obs.kind == "LOW_BEAM":
-                    if (
-                        self.cat_jump_height > 0.12
-                        or self.cat_jump_timer > 0.0
-                        or self.jump_grace_timer > 0.0
-                    ):
-                        obs.cleared = True
-                        self.streak += 1
-                        self.max_streak = max(self.max_streak, self.streak)
-                        pts = 150 * self.combo_multiplier
-                        self.score += pts
-                        self.action_banner = f"JUMPED OVER FLOOR LASER +{pts} (x{self.combo_multiplier})"
-                        self.action_banner_timer = 1.4
-                        self._add_popup(f"JUMP +{pts}", lane=self.target_lane, is_gold=False)
-                        self._emit_sound("dodge")
-                    else:
-                        obs.cleared = True
-                        self.busted_reason = "TRIPPED FLOOR LASER (JUMP OVER IT)"
-                        self._trigger_busted(self.current_motion, is_simulation)
-                        return
-
-                elif obs.kind == "SIDE_BLOCK":
-                    if (
-                        self.target_lane != obs.lane
-                        or abs(self.cat_lane_pos - float(obs.lane)) >= 0.40
-                        or self.cat_jump_height > 0.45
-                    ):
-                        obs.cleared = True
-                        self.streak += 1
-                        self.max_streak = max(self.max_streak, self.streak)
-                        pts = 120 * self.combo_multiplier
-                        self.score += pts
-                        self.action_banner = f"DODGED SECURITY PYLON +{pts} (x{self.combo_multiplier})"
-                        self.action_banner_timer = 1.2
-                        self._add_popup(f"DODGE +{pts}", lane=self.target_lane, is_gold=False)
-                        self._emit_sound("dodge")
-                    else:
-                        obs.cleared = True
-                        self.busted_reason = "HIT SECURITY PYLON (STEP LEFT OR RIGHT)"
-                        self._trigger_busted(self.current_motion, is_simulation)
-                        return
-            elif rel < -0.55:
+            rel = obs.distance_m - dist
+            if rel > 0.55:
+                continue
+            if rel < -0.45:
                 obs.cleared = True
+                continue
+
+            if obs.kind == "HIGH_GATE":
+                if self.is_rolling or self.is_crouching or self.crouch_grace_timer > 0.0:
+                    obs.cleared = True
+                    self.streak += 1
+                    self.max_streak = max(self.max_streak, self.streak)
+                    pts = 150 * self.combo_multiplier
+                    self.score += pts
+                    self.action_banner = f"ROLLED UNDER LASER GATE +{pts} (x{self.combo_multiplier})"
+                    self.action_banner_timer = 1.4
+                    self._add_popup(f"ROLL +{pts}", lane=self.target_lane, is_gold=False)
+                    self._emit_sound("dodge")
+                else:
+                    obs.cleared = True
+                    self.busted_reason = "HIT HIGH LASER GATE (CROUCH TO ROLL UNDER)"
+                    self._trigger_busted(self.current_motion, is_simulation)
+                    return
+
+            elif obs.kind == "LOW_BEAM":
+                if (
+                    self.cat_jump_height > 0.12
+                    or self.cat_jump_timer > 0.0
+                    or self.jump_grace_timer > 0.0
+                ):
+                    obs.cleared = True
+                    self.streak += 1
+                    self.max_streak = max(self.max_streak, self.streak)
+                    pts = 150 * self.combo_multiplier
+                    self.score += pts
+                    self.action_banner = f"JUMPED OVER FLOOR LASER +{pts} (x{self.combo_multiplier})"
+                    self.action_banner_timer = 1.4
+                    self._add_popup(f"JUMP +{pts}", lane=self.target_lane, is_gold=False)
+                    self._emit_sound("dodge")
+                else:
+                    obs.cleared = True
+                    self.busted_reason = "TRIPPED FLOOR LASER (JUMP OVER IT)"
+                    self._trigger_busted(self.current_motion, is_simulation)
+                    return
+
+            elif obs.kind == "SIDE_BLOCK":
+                if (
+                    self.target_lane != obs.lane
+                    or abs(self.cat_lane_pos - float(obs.lane)) >= 0.40
+                    or self.cat_jump_height > 0.45
+                ):
+                    obs.cleared = True
+                    self.streak += 1
+                    self.max_streak = max(self.max_streak, self.streak)
+                    pts = 120 * self.combo_multiplier
+                    self.score += pts
+                    self.action_banner = f"DODGED SECURITY PYLON +{pts} (x{self.combo_multiplier})"
+                    self.action_banner_timer = 1.2
+                    self._add_popup(f"DODGE +{pts}", lane=self.target_lane, is_gold=False)
+                    self._emit_sound("dodge")
+                else:
+                    obs.cleared = True
+                    self.busted_reason = "HIT SECURITY PYLON (STEP LEFT OR RIGHT)"
+                    self._trigger_busted(self.current_motion, is_simulation)
+                    return
 
     def _advance_cat(self, dt: float, speed_mps: float) -> None:
         delta_m = speed_mps * dt
@@ -521,14 +548,7 @@ class GameState:
         self.phase = Phase.WARNING
         self.phase_timer = WARNING_DURATION_SEC
         self._emit_sound("klaxon")
-        self.telemetry.append(
-            TelemetryEventIn(
-                event_type="LASER_SWEEP",
-                motion_delta=self.current_motion,
-                heist_distance=self.total_distance_meters or self.distance_meters,
-                elapsed_sec=self.elapsed_sec,
-            )
-        )
+        self._record_telemetry("LASER_SWEEP", self.current_motion)
 
     def _enter_freeze(self) -> None:
         self.phase = Phase.FREEZE
@@ -546,14 +566,7 @@ class GameState:
         self.score += pts
         self._add_popup(f"FREEZE CLEAR +{pts}", lane=self.target_lane, is_gold=True)
         self._emit_sound("clear")
-        self.telemetry.append(
-            TelemetryEventIn(
-                event_type="FREEZE_PASS",
-                motion_delta=self.current_motion,
-                heist_distance=self.total_distance_meters or self.distance_meters,
-                elapsed_sec=self.elapsed_sec,
-            )
-        )
+        self._record_telemetry("FREEZE_PASS", self.current_motion)
 
     def _trigger_busted(self, motion_score: float, is_simulation: bool) -> None:
         self.phase = Phase.BUSTED
@@ -561,14 +574,7 @@ class GameState:
         self.cat_chase_offset = 0.0
         self.dog_chase_x = max(-0.20, self.progress_ratio - 0.35)
         self._emit_sound("alarm")
-        self.telemetry.append(
-            TelemetryEventIn(
-                event_type="MOTION_DETECTED",
-                motion_delta=motion_score,
-                heist_distance=self.total_distance_meters or self.distance_meters,
-                elapsed_sec=self.elapsed_sec,
-            )
-        )
+        self._record_telemetry("MOTION_DETECTED", motion_score)
         self._submit_run("BUSTED", is_simulation)
 
     def _trigger_victory(self, is_simulation: bool) -> None:
@@ -576,14 +582,7 @@ class GameState:
         self.distance_meters = self.goal_meters
         self.score += 1500 + self.coins * 100
         self._emit_sound("victory")
-        self.telemetry.append(
-            TelemetryEventIn(
-                event_type="HEIST_COMPLETE",
-                motion_delta=self.current_motion,
-                heist_distance=self.total_distance_meters or self.distance_meters,
-                elapsed_sec=self.elapsed_sec,
-            )
-        )
+        self._record_telemetry("HEIST_COMPLETE", self.current_motion)
         self._submit_run("VICTORY", is_simulation)
 
     def _submit_run(self, outcome: str, is_simulation: bool) -> None:

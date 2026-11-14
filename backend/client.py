@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import socket
@@ -34,6 +35,7 @@ class BackendService:
         self._lock = threading.Lock()
         self._server: Optional[uvicorn.Server] = None
         self._thread: Optional[threading.Thread] = None
+        self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="BackendWorker")
 
         self.api_online: bool = False
         self.leaderboard: list[RunRecord] = []
@@ -74,6 +76,7 @@ class BackendService:
     def stop(self) -> None:
         if self._server is not None:
             self._server.should_exit = True
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _is_port_open(self) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -106,11 +109,7 @@ class BackendService:
             return None
 
     def refresh_async(self, limit: int = 8) -> None:
-        threading.Thread(
-            target=self._refresh_worker,
-            args=(limit,),
-            daemon=True,
-        ).start()
+        self._pool.submit(self._refresh_worker, limit)
 
     def _refresh_worker(self, limit: int) -> None:
         lb_data = self._http_json(f"/api/leaderboard?limit={limit}")
@@ -130,11 +129,7 @@ class BackendService:
             self.stats = stats
 
     def submit_run_async(self, payload: RunCreate) -> None:
-        threading.Thread(
-            target=self._submit_run_worker,
-            args=(payload,),
-            daemon=True,
-        ).start()
+        self._pool.submit(self._submit_run_worker, payload)
 
     def _submit_run_worker(self, payload: RunCreate) -> None:
         res = self._http_json("/api/runs", method="POST", body=payload.model_dump())
@@ -145,11 +140,7 @@ class BackendService:
     def save_settings_async(self, payload: SettingsPayload) -> None:
         with self._lock:
             self.settings = payload
-        threading.Thread(
-            target=self._save_settings_worker,
-            args=(payload,),
-            daemon=True,
-        ).start()
+        self._pool.submit(self._save_settings_worker, payload)
 
     def _save_settings_worker(self, payload: SettingsPayload) -> None:
         res = self._http_json("/api/settings", method="PUT", body=payload.model_dump())

@@ -7,7 +7,6 @@ MIN_WIDTH = 960
 MIN_HEIGHT = 620
 TARGET_FPS = 60
 
-# UI colors
 COLOR_BG = (0, 0, 0)
 COLOR_WHITE = (255, 255, 255)
 COLOR_RED = (255, 51, 51)
@@ -24,7 +23,6 @@ COLOR_SHADOW = (255, 255, 255)
 BORDER_WIDTH = 3
 SHADOW_OFFSET = 6
 
-# Base movement and timing settings
 HEIST_GOAL_METERS = 50.0
 CAT_WALK_SPEED_MPS = 5.0
 CAT_ROLL_SPEED_BOOST_MPS = 7.2
@@ -41,7 +39,6 @@ CAT_ROLL_DURATION_SEC = 0.80
 OBSTACLE_SPAWN_MIN_SEC = 1.55
 OBSTACLE_SPAWN_MAX_SEC = 2.45
 
-# Webcam and pose thresholds
 CV_CAMERA_INDEX = 0
 CV_FRAME_WIDTH = 320
 CV_FRAME_HEIGHT = 240
@@ -57,7 +54,7 @@ BACKEND_PORT = 8765
 DB_FILENAME = "laser_paw_patrol.db"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LevelSpec:
     number: int
     name: str
@@ -93,7 +90,7 @@ def get_level_spec(level_num: int) -> LevelSpec:
     return LEVELS[idx]
 
 
-@dataclass
+@dataclass(slots=True)
 class GameConfig:
     motion_threshold: float = DEFAULT_MOTION_THRESHOLD
     freeze_duration: float = FREEZE_DURATION_SEC
