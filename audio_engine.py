@@ -42,7 +42,6 @@ class AudioEngine:
     def _build_sounds(self) -> None:
         sr = self.SAMPLE_RATE
 
-        # Warning klaxon before freeze sweep
         dur = 0.42
         t = np.linspace(0, dur, int(sr * dur), endpoint=False, dtype=np.float32)
         freq = 540.0 + 260.0 * np.sin(2.0 * np.pi * 6.0 * t)
@@ -53,7 +52,6 @@ class AudioEngine:
         if snd:
             self._sounds["klaxon"] = snd
 
-        # Alarm when caught
         dur_a = 0.85
         ta = np.linspace(0, dur_a, int(sr * dur_a), endpoint=False, dtype=np.float32)
         freq_a = 720.0 + 380.0 * np.sign(np.sin(2.0 * np.pi * 5.0 * ta))
@@ -64,7 +62,6 @@ class AudioEngine:
         if snd:
             self._sounds["alarm"] = snd
 
-        # Clear chime after surviving freeze
         notes = [523.25, 659.25, 783.99]
         parts = []
         for f in notes:
@@ -75,7 +72,6 @@ class AudioEngine:
         if snd:
             self._sounds["clear"] = snd
 
-        # Level advancement chime
         lvl_notes = [587.33, 739.99, 880.0]
         lvl_parts = []
         for f in lvl_notes:
@@ -86,7 +82,6 @@ class AudioEngine:
         if snd:
             self._sounds["level_up"] = snd
 
-        # Final victory fanfare
         v_notes = [523.25, 659.25, 783.99, 1046.5]
         v_parts = []
         for idx, f in enumerate(v_notes):
@@ -98,14 +93,12 @@ class AudioEngine:
         if snd:
             self._sounds["victory"] = snd
 
-        # Soft paw step
         ts = np.linspace(0, 0.045, int(sr * 0.045), endpoint=False, dtype=np.float32)
         step_w = np.sin(2.0 * np.pi * 195.0 * ts) * self._envelope(len(ts), 0.08, 0.7)
         snd = self._to_sound(step_w, volume=0.10)
         if snd:
             self._sounds["step"] = snd
 
-        # Jump sound
         tj = np.linspace(0, 0.18, int(sr * 0.18), endpoint=False, dtype=np.float32)
         f_jump = np.linspace(260.0, 680.0, len(tj), dtype=np.float32)
         p_jump = np.cumsum(2.0 * np.pi * f_jump / sr)
@@ -114,7 +107,6 @@ class AudioEngine:
         if snd:
             self._sounds["jump"] = snd
 
-        # Crouch roll whoosh
         tr = np.linspace(0, 0.22, int(sr * 0.22), endpoint=False, dtype=np.float32)
         f_roll = np.linspace(480.0, 140.0, len(tr), dtype=np.float32)
         p_roll = np.cumsum(2.0 * np.pi * f_roll / sr)
@@ -123,14 +115,12 @@ class AudioEngine:
         if snd:
             self._sounds["roll"] = snd
 
-        # Obstacle cleared blip
         td = np.linspace(0, 0.09, int(sr * 0.09), endpoint=False, dtype=np.float32)
         w_dodge = np.sin(2.0 * np.pi * 880.0 * td) * self._envelope(len(td), 0.05, 0.5)
         snd = self._to_sound(w_dodge, volume=0.22)
         if snd:
             self._sounds["dodge"] = snd
 
-        # Classic arcade dual-tone coin pickup ding (B5 -> E6)
         tc1 = np.linspace(0, 0.055, int(sr * 0.055), endpoint=False, dtype=np.float32)
         tc2 = np.linspace(0, 0.13, int(sr * 0.13), endpoint=False, dtype=np.float32)
         w_c1 = np.sin(2.0 * np.pi * 987.77 * tc1) * self._envelope(len(tc1), 0.04, 0.2)

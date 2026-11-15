@@ -154,7 +154,6 @@ class UIRenderer:
         w, h = surface.get_size()
         surface.fill(COLOR_BG)
 
-        # Full-height 3D Egyptian Desert & Temple Corridor on the main viewport
         self._draw_cat_pov_viewport(surface, w, h, state)
         self._draw_pov_lasers(surface, w, h, state)
         self._draw_blood_stains_and_particles(surface, w, h, state)
@@ -172,7 +171,6 @@ class UIRenderer:
                 self._flash_overlay.fill((210, 18, 28, alpha))
                 surface.blit(self._flash_overlay, (0, 0))
 
-        # Clean Minimal Right Sidebar (CCTV Cam + 2D Side View Window)
         self._draw_top_hud(surface, w, state, cv_sample, api_online)
         self._draw_cctv_feed(surface, w, state, cv_sample)
         self._draw_2d_pip_window(surface, w, h, state)
@@ -231,7 +229,6 @@ class UIRenderer:
         vy_clamped = max(90, min(h - 120, vy))
         dist = state.distance_meters
 
-        # 1. DESERT SKY LAYER (0 .. vy_clamped)
         sky_surf = self._sprite("desert_sky", corridor_w, vy_clamped + 18)
         if sky_surf is not None:
             surface.blit(sky_surf, (0, 0))
@@ -239,7 +236,6 @@ class UIRenderer:
             pygame.draw.rect(surface, COLOR_SKY_TOP, (0, 0, corridor_w, vy_clamped // 2))
             pygame.draw.rect(surface, COLOR_SKY_HORIZON, (0, vy_clamped // 2, corridor_w, vy_clamped - vy_clamped // 2))
 
-        # Distant Parallax Pyramids & Temple Silhouettes on the Horizon
         pyr_big = self._sprite("pyramid", 190, 130)
         pyr_sm = self._sprite("pyramid", 125, 86)
         parallax_shift = int(dist * 6.0) % 420
@@ -249,7 +245,6 @@ class UIRenderer:
             elif pyr_sm is not None:
                 surface.blit(pyr_sm, (px, vy_clamped - 78))
 
-        # 2. BEST EGYPTIAN DESERT & SANDSTONE GROUND LAYER (vy_clamped .. h)
         ground_h = max(40, h - vy_clamped)
         ground_tex = self._sprite("desert_ground", corridor_w, ground_h)
         if ground_tex is not None:
@@ -257,7 +252,6 @@ class UIRenderer:
         else:
             pygame.draw.rect(surface, COLOR_SAND_MID, (0, vy_clamped, corridor_w, ground_h))
 
-        # Perspective-projected Egyptian Sandstone Roadbed & Hieroglyphic Slabs
         scroll_offset = dist % 2.6
         depth_steps = [0.38] + [i * 2.6 - scroll_offset for i in range(1, 14) if i * 2.6 - scroll_offset > 0.38] + [36.0]
         depth_steps.sort(reverse=True)
@@ -284,7 +278,6 @@ class UIRenderer:
                 1.5, 0.0, z_near, vx, vy, corridor_w, h, cam_h, state.cat_lane_pos
             )
 
-            # Outer desert sand terraces on left & right of the sandstone road
             band_idx = int((dist + z_near) / 2.6)
             outer_col = (206, 184, 134) if band_idx % 2 == 0 else (188, 164, 114)
             if nl_y > fr_y:
@@ -299,7 +292,6 @@ class UIRenderer:
                     [(fr_x, fr_y), (corridor_w, fr_y), (corridor_w, nr_y), (nr_x, nr_y)],
                 )
 
-            # Inner 3-lane Egyptian Sandstone Causeway polygon
             slab_col = (176, 148, 92) if band_idx % 2 == 0 else (154, 126, 74)
             if state.phase in (Phase.FREEZE, Phase.BUSTED):
                 slab_col = (135, 58, 52) if band_idx % 2 == 0 else (112, 42, 38)
@@ -309,7 +301,6 @@ class UIRenderer:
             quad = [(fl_x, fl_y), (fr_x, fr_y), (nr_x, nr_y), (nl_x, nl_y)]
             pygame.draw.polygon(surface, slab_col, quad)
 
-            # Blit textured hieroglyphic stone strip on near slabs for rich ground detail
             slab_h = nl_y - fl_y
             slab_w = int((nr_x - nl_x + fr_x - fl_x) * 0.48)
             if 10 <= slab_h <= 110 and slab_w > 40:
@@ -324,13 +315,10 @@ class UIRenderer:
                         cx_slab = (fl_x + fr_x + nl_x + nr_x) // 4
                         surface.blit(scaled_strip, (cx_slab - slab_w // 2, fl_y))
 
-            # Sandstone mortar joint line across the road
             pygame.draw.line(surface, COLOR_SAND_DEEP, (fl_x, fl_y), (fr_x, fr_y), 2)
 
-        # Horizon separator line
         pygame.draw.line(surface, COLOR_SAND_DARK, (0, vy_clamped), (corridor_w, vy_clamped), 2)
 
-        # 3-Lane dividers & raised golden curb borders
         for lane_edge in (-1.5, -0.5, 0.5, 1.5):
             fx0, fy0, _ = self._project_corridor_point(
                 lane_edge, 0.0, 0.4, vx, vy, corridor_w, h, cam_h, state.cat_lane_pos
@@ -344,7 +332,6 @@ class UIRenderer:
             else:
                 pygame.draw.line(surface, (110, 88, 48), (fx0, fy0), (fx1, fy1), 2)
 
-        # Egyptian Sandstone Pillars & Temple Archways flanking the causeway
         for i in range(11, 0, -1):
             z = i * 2.6 - scroll_offset
             if z <= 0.45:
@@ -368,7 +355,6 @@ class UIRenderer:
                 surface.blit(pil_surf, (lx0 - pil_w // 2, ly1))
                 surface.blit(pil_surf, (rx0 - pil_w // 2, ry1))
 
-        # Goal Temple Archway & Treasure Relic at the Extraction Point
         rem_dist = max(1.2, state.goal_meters - dist)
         if rem_dist < 45.0:
             bx, by, bscale = self._project_corridor_point(
@@ -388,7 +374,6 @@ class UIRenderer:
                 radius = max(10, int(68 * bscale))
                 pygame.draw.circle(surface, COLOR_GOLD, (bx, by), radius)
 
-        # Collectibles & Obstacles along the 3D Causeway
         for coin in reversed(state.coins_list):
             if coin.collected:
                 continue
@@ -403,7 +388,6 @@ class UIRenderer:
             if -0.4 <= depth <= 34.0:
                 self._draw_pov_obstacle(surface, obs, depth, vx, vy, corridor_w, h, cam_h, state)
 
-        # Clean minimal footer cue
         hint = "HANDS: 2 UP=JUMP | 2 DOWN=CROUCH | 1 L/R=LANE  [KEYS: W / S / A / D]"
         hint_surf = self._txt(self.font_xs, hint, (190, 190, 190))
         hint_bg = pygame.Rect(16, h - 26, hint_surf.get_width() + 16, 18)
@@ -517,7 +501,6 @@ class UIRenderer:
             return
         corridor_w = max(560, w - 310)
         cx = corridor_w // 2
-        # Limit visible popups to the most recent 2 to prevent cluttered visual chaos
         for idx, p in enumerate(state.popups[-2:]):
             px = cx + p.lane * 135
             rise = int((1.0 - p.timer) * 55)
@@ -554,7 +537,6 @@ class UIRenderer:
         self, surface: pygame.Surface, w: int, h: int, state: GameState
     ) -> None:
         corridor_w = max(560, w - 310)
-        # Persistent floor/screen blood stains after crashes
         for stain in state.blood_stains:
             sx = int(stain.norm_x * corridor_w)
             sy = int(stain.norm_y * h)
@@ -572,7 +554,6 @@ class UIRenderer:
         bounce_y = int(math.sin(state.walk_cycle) * 14.0 * state.effective_bounce_multiplier) if state.phase != Phase.FREEZE else 0
         crouch_factor = max(state.cat_crouch_depth, 1.0 if state.is_rolling else 0.0)
 
-        # Cat ears at top of viewport (droop slightly as cat loses lives/strength)
         weak_droop = int(state.deaths_count * 2.5)
         ear_bob = int(state.cat_bounce_height * 8.0) + int(crouch_factor * 24) - int(state.cat_jump_height * 10) + weak_droop
         ear_base_y = 86 + int(crouch_factor * 14)
@@ -588,7 +569,6 @@ class UIRenderer:
         pygame.draw.polygon(surface, COLOR_BG, right_ear)
         pygame.draw.polygon(surface, ear_col, right_ear, 2)
 
-        # Main Burglar Cat character at bottom of the causeway + POV paws
         jump_lift = int(state.cat_jump_height * 118)
         cat_w = 104 if not state.is_rolling else 94
         cat_h = int(128 * (1.0 - 0.36 * crouch_factor))
@@ -599,7 +579,6 @@ class UIRenderer:
 
         cat_sprite = self._sprite("burglar_cat", cat_w, cat_h) or self._sprite("chubby_cat_sketch", cat_w, cat_h)
         if state.reincarnating_timer > 0.75:
-            # DYING PHASE: Cat collapses 90 degrees onto crimson death ring
             death_pulse = 1.0 + 0.12 * math.sin(state.reincarnating_timer * 24.0)
             ring_rx = int(58 * death_pulse)
             ring_ry = int(18 * death_pulse)
@@ -618,7 +597,6 @@ class UIRenderer:
             is_rebirth = 0.0 < state.reincarnating_timer <= 0.75
             rebirth_prog = (0.75 - state.reincarnating_timer) / 0.75 if is_rebirth else 0.0
             if is_rebirth:
-                # REINCARNATING PHASE: Descending Golden Ankh Reincarnation Beam + expanding rings
                 beam_w = 136
                 beam_surf = pygame.Surface((beam_w, max(20, h - 38)), pygame.SRCALPHA)
                 beam_alpha = int(115 * math.sin(max(0.05, rebirth_prog) * math.pi))
@@ -655,7 +633,6 @@ class UIRenderer:
                 surface.blit(roll_lbl, (cx - roll_lbl.get_width() // 2, h - 192))
             else:
                 if cat_sprite is not None:
-                    # Slight limping tilt when weakened by deaths
                     if state.deaths_count > 0:
                         limp_deg = math.sin(state.walk_cycle * 0.5) * min(12.0, state.deaths_count * 1.4)
                         tilted = pygame.transform.rotate(cat_sprite, limp_deg)
@@ -664,7 +641,6 @@ class UIRenderer:
                     else:
                         surface.blit(cat_sprite, (cx - cat_w // 2, cat_y))
 
-                    # Draw battle scars / blood spots / bandages proportional to deaths_count (1..9)
                     if state.deaths_count > 0:
                         scar_count = min(6, state.deaths_count)
                         for s_idx in range(scar_count):
@@ -672,7 +648,6 @@ class UIRenderer:
                             sy = cat_y + 34 + (s_idx // 3) * 26
                             pygame.draw.line(surface, (220, 22, 32), (sx - 6, sy - 4), (sx + 6, sy + 4), 3)
                             pygame.draw.circle(surface, (185, 16, 24), (sx + 2, sy + 5), 3)
-                        # White bandage strip across wounded cat
                         if state.deaths_count >= 2:
                             band_rect = pygame.Rect(cx - 24, cat_y + 48, 48, 10)
                             pygame.draw.rect(surface, COLOR_WHITE, band_rect)
@@ -710,7 +685,6 @@ class UIRenderer:
                 pygame.draw.rect(surface, COLOR_GOLD, rbg, 2)
                 surface.blit(reb_lbl, (cx - reb_lbl.get_width() // 2, rbg.y + 3))
 
-        # Active flying crimson blood droplets after a crash
         for bp in state.blood_particles:
             bpx = int(cx + bp.rel_x)
             bpy = int(cat_y + cat_h * 0.45 + bp.rel_y)
@@ -769,20 +743,17 @@ class UIRenderer:
         floor_y = int(sh * 0.74)
         dist = state.distance_meters
 
-        # 1. Sky + Desert Horizon inside the 2D Side Window
         sky_pip = self._sprite("desert_sky", sw, floor_y)
         if sky_pip is not None:
             sub.blit(sky_pip, (0, 0))
         else:
             pygame.draw.rect(sub, COLOR_SKY_TOP, (0, 0, sw, floor_y))
 
-        # Parallax Pyramid Silhouette
         pyr_pip = self._sprite("pyramid", 86, 58)
         if pyr_pip is not None:
             for px_p in range(-(int(dist * 5) % 160), sw + 80, 160):
                 sub.blit(pyr_pip, (px_p, floor_y - 56))
 
-        # Scrolling Pillars & Temple Archways
         pil_pip = self._sprite("pillar", 28, 72)
         arch_pip = self._sprite("temple_archway", 58, 66)
         bg_scroll = int(dist * 22.0) % 140
@@ -792,7 +763,6 @@ class UIRenderer:
             elif idx % 2 == 1 and arch_pip is not None:
                 sub.blit(arch_pip, (bx, floor_y - 66))
 
-        # Tiled Egyptian Sandstone Floor across bottom of Side Window
         t1 = self._sprite("floor_tile_1", 46, max(18, sh - floor_y))
         t2 = self._sprite("floor_tile_2", 46, max(18, sh - floor_y))
         pygame.draw.rect(sub, COLOR_SAND_DARK, (0, floor_y, sw, sh - floor_y))
@@ -807,7 +777,6 @@ class UIRenderer:
         cat_2d_x = 54
         pixels_per_m = 12.0
 
-        # Collectible Relics (Ankhs & Rubies)
         for coin in state.coins_list:
             if coin.collected:
                 continue
@@ -821,7 +790,6 @@ class UIRenderer:
                 else:
                     pygame.draw.circle(sub, COLOR_GOLD, (cx_2d, cy_2d), 5)
 
-        # Obstacles (Tomb Shrine, Mummy Sarcophagus, Pharaoh Mask)
         for obs in state.obstacles:
             if obs.cleared:
                 continue
@@ -846,7 +814,6 @@ class UIRenderer:
                     else:
                         pygame.draw.rect(sub, COLOR_AMBER, (ox - 7, floor_y - 34, 14, 34), 2)
 
-        # Goal Treasure at far right of 2D Side Window
         goal_rel_m = state.goal_meters - dist
         goal_x = min(sw - 22, cat_2d_x + int(goal_rel_m * pixels_per_m))
         g_pip = self._sprite(self._goal_sprite_name(state.level), 28, 28)
@@ -855,12 +822,10 @@ class UIRenderer:
         else:
             pygame.draw.circle(sub, COLOR_GOLD, (goal_x, floor_y - 16), 11)
 
-        # Chubby Burglar Cat in 2D Side Window (with 10s escalating bounce & blood droplets)
         bounce_2d = int(state.cat_bounce_height * 12.0) if state.phase != Phase.FREEZE else 0
         jump_2d = int(state.cat_jump_height * 46)
         cat_2d_y = max(18, floor_y - 20 - bounce_2d - jump_2d)
 
-        # Blood stains on 2D floor
         if state.deaths_count > 0:
             for d_i in range(min(5, state.deaths_count)):
                 pygame.draw.circle(sub, (185, 18, 26), (cat_2d_x - 8 + d_i * 5, floor_y + 3), 3)
@@ -953,7 +918,6 @@ class UIRenderer:
         hdr_lbl = self._txt(self.font_xs, "HAND GESTURE & 9-LIVES TELEMETRY", COLOR_GREEN)
         surface.blit(hdr_lbl, (box_x + 8, box_y + 5))
 
-        # Target Relic showcase box
         relic_box = pygame.Rect(box_x + 10, box_y + 32, 58, 58)
         pygame.draw.rect(surface, COLOR_GRAY_DARK, relic_box)
         pygame.draw.rect(surface, COLOR_GOLD, relic_box, 2)
@@ -961,7 +925,6 @@ class UIRenderer:
         if relic_surf is not None:
             surface.blit(relic_surf, (relic_box.x + 7, relic_box.y + 7))
 
-        # Hand Gesture, Posture & Weakness status next to Relic
         posture_col = (
             COLOR_CYAN
             if cv_sample.human_posture == "CROUCH"
@@ -981,7 +944,6 @@ class UIRenderer:
         surface.blit(p_lbl, (box_x + 76, box_y + 52))
         surface.blit(w_lbl, (box_x + 76, box_y + 71))
 
-        # 10-Second Escalating Bounce Meter
         b_y = box_y + 98
         if state.bounce_saturated:
             b_txt = f"BOUNCE HEIGHT: {state.bounce_multiplier:.2f}x [MAX SATURATED]"
@@ -998,7 +960,6 @@ class UIRenderer:
         pygame.draw.rect(surface, b_col, (b_bar.x, b_bar.y, int(b_bar.width * b_ratio), b_bar.height))
         pygame.draw.rect(surface, COLOR_WHITE, b_bar, 1)
 
-        # Next Laser Sweep Countdown Bar
         sweep_y = b_y + 34
         if box_y + box_h >= sweep_y + 34:
             if state.phase == Phase.FREEZE:
@@ -1048,13 +1009,11 @@ class UIRenderer:
             shadow_off=4,
         )
 
-        # Section 1: Score & Level
         score_val = self._txt(self.font_md, f"{state.score:05d}", COLOR_WHITE)
         lvl_lbl = self._txt(self.font_xs, f"LVL {state.level}/{MAX_LEVEL}", COLOR_GOLD)
         surface.blit(lvl_lbl, (26, 19))
         surface.blit(score_val, (26, 31))
 
-        # Section 2: 9 Lives Indicators (minimal dots/bars)
         lives_x = 142
         lives_col = COLOR_RED if state.lives_remaining <= 3 else COLOR_GREEN
         lives_hdr = self._txt(self.font_xs, f"LIVES {state.lives_remaining}/9", lives_col)
@@ -1065,7 +1024,6 @@ class UIRenderer:
             pygame.draw.rect(surface, COLOR_RED if alive else (45, 45, 50), pip_rect)
             pygame.draw.rect(surface, COLOR_WHITE if alive else (60, 60, 65), pip_rect, 1)
 
-        # Section 3: Sector Distance Progress Bar
         dist_x = 282
         bar_w = max(70, hud_w - 470)
         dist_lbl = self._txt(
@@ -1081,7 +1039,6 @@ class UIRenderer:
             pygame.draw.rect(surface, COLOR_GOLD, (bar_rect.x, bar_rect.y, fill_w, bar_rect.height))
         pygame.draw.rect(surface, COLOR_WHITE, bar_rect, 1)
 
-        # Section 4: Clean Hand Action Cue
         right_x = hud_rect.right - 150
         pose_col = COLOR_CYAN if cv_sample.human_posture == "CROUCH" else (COLOR_GOLD if cv_sample.human_posture == "JUMP" else COLOR_GREEN)
         pose_lbl = self._txt(self.font_sm, f"{cv_sample.human_posture}", pose_col)

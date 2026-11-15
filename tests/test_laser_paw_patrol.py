@@ -96,7 +96,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertEqual(sample.human_lane, -1)
         self.assertEqual(sample.human_posture, "CROUCH")
 
-        # Real CV upward impulse jump detection
         tracker.set_pose_overrides(lane=None, posture=None)
         base_frame = tracker._generate_sim_frame(motion_active=False)
         tracker._compute_motion_and_pose(base_frame, is_sim=False, lane_override=None, posture_override=None)
@@ -106,7 +105,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         )
         self.assertEqual(detected_posture, "JUMP")
 
-        # Real CV downward crouch detection (without false-triggering JUMP)
         tracker.calibrate_neutral()
         tracker._neutral_y = 0.50
         tracker._smoothed_y = 0.50
@@ -118,17 +116,14 @@ class TestLaserPawPatrol(unittest.TestCase):
         )
         self.assertEqual(detected_crouch, "CROUCH")
 
-        # Ensure 60Hz None overrides from main loop do not wipe out CV crouch hold
         tracker.set_pose_overrides(lane=None, posture=None)
         self.assertGreater(tracker._crouch_hold_until, 0.0)
 
-        # Standing back up from crouch returns to STAND without false-triggering JUMP
         _, _, _, _, _, stand_posture = tracker._compute_motion_and_pose(
             base_frame, is_sim=False, lane_override=None, posture_override=None
         )
         self.assertNotEqual(stand_posture, "JUMP")
 
-        # 3-zone vertical posture matches 3-zone horizontal lane behavior (Jump / Stand / Crouch)
         tracker._jump_hold_until = 0.0
         tracker._crouch_hold_until = 0.0
         tracker._neutral_y = 0.50
@@ -139,8 +134,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         )
         self.assertEqual(center_posture, "STAND")
 
-        # Single hand moved left or right steers lanes without triggering jump/crouch
-        # (Note: _compute_motion_and_pose mirrors raw camera frames horizontally when is_sim=False)
         left_hand_raw = tracker._generate_sim_frame(motion_active=False, lane_override=1, posture_override=None)
         _, _, _, _, detected_left_lane, left_posture = tracker._compute_motion_and_pose(
             left_hand_raw, is_sim=False, lane_override=None, posture_override=None
@@ -169,7 +162,6 @@ class TestLaserPawPatrol(unittest.TestCase):
             CorridorCoin(distance_m=6.0, lane=1, tier="FLOOR"),
         ]
 
-        # 1. Crouch-roll under HIGH_GATE + collect LOW_ROLL coin
         state.distance_meters = 0.95
         state.update(0.05, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="CROUCH")
         self.assertTrue(state.is_rolling)
@@ -178,7 +170,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertEqual(state.coins, 1)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
-        # 2. Jump over LOW_BEAM + collect AIR coin
         state.distance_meters = 3.45
         state.update(0.05, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="JUMP")
         self.assertGreater(state.cat_jump_height, 0.0)
@@ -187,7 +178,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertEqual(state.coins, 2)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
-        # 3. Step right to dodge SIDE_BLOCK + collect FLOOR coin in lane 1
         state.distance_meters = 5.90
         for _ in range(5):
             state.update(0.04, motion_score=0.0, is_simulation=True, human_lane=1, human_posture="STAND")
@@ -197,7 +187,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertGreaterEqual(len(state.popups), 1)
         self.assertNotEqual(state.phase, Phase.BUSTED)
 
-        # 4. Mid-jump crouch cancel (dive-roll) and mid-crouch jump cancel
         state.trigger_jump(force=True)
         self.assertGreater(state.cat_jump_timer, 0.0)
         state.trigger_crouch_roll(force=True)
@@ -255,7 +244,6 @@ class TestLaserPawPatrol(unittest.TestCase):
 
     def test_nine_lives_weakness_blood_and_10s_bounce_saturation(self) -> None:
         state = GameState()
-        # Test starting heist via hand gesture (holding JUMP / OPEN_PALM on MENU)
         self.assertEqual(state.phase, Phase.MENU)
         for _ in range(6):
             state.update(0.1, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="JUMP")
@@ -265,7 +253,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         self.assertEqual(state.bounce_tier, 0)
         self.assertEqual(state.bounce_multiplier, 1.0)
 
-        # Test 10s escalating bounce and saturation at Tier 5 (50s+)
         state.elapsed_sec = 9.95
         state.update(0.1, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="STAND")
         self.assertEqual(state.bounce_tier, 1)
@@ -282,7 +269,6 @@ class TestLaserPawPatrol(unittest.TestCase):
         state.update(0.1, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="STAND")
         self.assertEqual(state.bounce_multiplier, saturated_mult)
 
-        # Test 9 lives: crashing 8 times weakens the cat each time and spawns blood without Game Over
         prev_strength = state.cat_strength
         for crash_num in range(1, 9):
             state.obstacles = [CorridorObstacle(kind="LOW_BEAM", distance_m=state.distance_meters + 0.05, lane=0)]
@@ -295,7 +281,6 @@ class TestLaserPawPatrol(unittest.TestCase):
             self.assertGreater(len(state.blood_stains), 0)
             self.assertNotEqual(state.phase, Phase.BUSTED)
 
-        # 9th crash exhausts the 9th life and triggers BUSTED
         state.obstacles = [CorridorObstacle(kind="LOW_BEAM", distance_m=state.distance_meters + 0.05, lane=0)]
         state.update(0.02, motion_score=0.0, is_simulation=True, human_lane=0, human_posture="STAND")
         self.assertEqual(state.lives_remaining, 0)

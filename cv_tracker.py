@@ -86,7 +86,6 @@ class MotionTracker:
         self._is_simulation = force_simulation
         self._status_label = "Starting"
 
-        # Pre-allocated image buffers for the vision loop (zero per-frame heap churn)
         self._prev_gray: Optional[np.ndarray] = None
         self._bg_gray: Optional[np.ndarray] = None
         self._frame_count: int = 0
@@ -116,14 +115,12 @@ class MotionTracker:
         self._sim_phase: float = 0.0
         self._consecutive_failures: int = 0
 
-        # Persistent face anchor & adaptive skin calibration
         self._face_cascade = self._load_cascade("haarcascade_frontalface_default.xml")
         self._face_box_smooth: Optional[tuple[float, float, float, float]] = None
         self._face_last_seen: float = 0.0
         self._face_cr: Optional[float] = None
         self._face_cb: Optional[float] = None
 
-        # Smoothed hand kinematics & persistence
         self._smoothed_x: float = 0.50
         self._smoothed_y: float = 0.50
         self._prev_raw_x: float = 0.50
@@ -334,7 +331,6 @@ class MotionTracker:
                 )
             self._face_last_seen = now
 
-            # Sample center patch of face in YCrCb to adapt skin tone to current lighting
             fx, fy, fw, fh = detected_box
             x0 = max(0, int(fx + fw * 0.28))
             x1 = min(self.width, int(fx + fw * 0.72))
@@ -367,13 +363,11 @@ class MotionTracker:
         cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb, dst=self._ycrcb_buf)
         cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV, dst=self._hsv_buf)
 
-        # Foreground motion detection (dynamic body tracking)
         if delta is not None:
             cv2.threshold(delta, 10, 255, cv2.THRESH_BINARY, dst=self._combined_hand_mask)
         else:
             cv2.threshold(self._fg_curr_buf, 14, 255, cv2.THRESH_BINARY, dst=self._combined_hand_mask)
 
-        # Include skin regions when present
         cv2.inRange(self._ycrcb_buf, (15, 128, 70), (255, 185, 135), dst=self._skin_mask)
         cv2.inRange(self._hsv_buf, (0, 20, 30), (32, 255, 255), dst=self._skin_hsv_mask)
         cv2.bitwise_or(self._skin_mask, self._skin_hsv_mask, dst=self._skin_mask)
@@ -496,14 +490,12 @@ class MotionTracker:
                 box_lane = 0
                 in_stand_box = not any_top and not any_bot
 
-        # Direct peripheral box pixel density triggers (higher threshold to prevent false-triggers from ambient light)
         if not is_sim and lane_override is None and posture_override is None:
             top_row = int(self.height * jump_enter)
             bot_row = int(self.height * crouch_enter)
             left_col = int(self.width * left_enter)
             right_col = int(self.width * right_enter)
 
-            # Measure pixel density only inside the designated peripheral fist zones
             top_px = int(np.count_nonzero(self._combined_hand_mask[:top_row, :]))
             bot_px = int(np.count_nonzero(self._combined_hand_mask[bot_row:, :]))
             left_px = int(np.count_nonzero(self._combined_hand_mask[top_row:bot_row, :left_col]))
@@ -563,18 +555,15 @@ class MotionTracker:
             vy = target_y - self._prev_raw_y
             self._prev_raw_x = target_x
             self._prev_raw_y = target_y
-            # Smooth with heavy dampening (0.60 previous + 0.40 current) to eliminate twitchy sensitivity
             self._smoothed_x = self._smoothed_x * 0.60 + target_x * 0.40
             self._smoothed_y = self._smoothed_y * 0.60 + target_y * 0.40
 
-        # Horizontal Lane Selection: Requires deliberate hand positioning into the side boxes
         if lane_override is not None:
             lane = lane_override
         elif box_lane is not None:
             lane = box_lane
         else:
             prev_lane = self._human_lane
-            # Deliberate threshold crossings with generous deadzone
             if self._smoothed_x < left_enter - 0.02 or vx < -0.08:
                 lane = -1
             elif self._smoothed_x > right_enter + 0.02 or vx > 0.08:
@@ -586,7 +575,6 @@ class MotionTracker:
             else:
                 lane = 0
 
-        # Vertical Posture Selection: Requires clear deliberate fist placement in Top or Bottom box
         if posture_override is not None:
             posture: PostureType = posture_override
             if posture == "JUMP":
@@ -604,7 +592,6 @@ class MotionTracker:
             self._crouch_hold_until = now + 0.28
             self._jump_hold_until = 0.0
         elif in_stand_box:
-            # Explicit hand placement inside enlarged center STAND box responds immediately
             posture = "STAND"
             self._jump_hold_until = 0.0
             self._crouch_hold_until = 0.0
@@ -663,16 +650,12 @@ class MotionTracker:
     ) -> None:
         lx = min(length, max(4, (x1 - x0) // 4))
         ly = min(length, max(4, (y1 - y0) // 4))
-        # Top-Left
         cv2.line(frame_bgr, (x0, y0), (x0 + lx, y0), color, thickness)
         cv2.line(frame_bgr, (x0, y0), (x0, y0 + ly), color, thickness)
-        # Top-Right
         cv2.line(frame_bgr, (x1, y0), (x1 - lx, y0), color, thickness)
         cv2.line(frame_bgr, (x1, y0), (x1, y0 + ly), color, thickness)
-        # Bottom-Left
         cv2.line(frame_bgr, (x0, y1), (x0 + lx, y1), color, thickness)
         cv2.line(frame_bgr, (x0, y1), (x0, y1 - ly), color, thickness)
-        # Bottom-Right
         cv2.line(frame_bgr, (x1, y1), (x1 - lx, y1), color, thickness)
         cv2.line(frame_bgr, (x1, y1), (x1, y1 - ly), color, thickness)
 
@@ -685,21 +668,17 @@ class MotionTracker:
         phase: float,
         label: str,
     ) -> None:
-        # Outer rotated diamond
         d = 16
         pts = np.array([[px, py - d], [px + d, py], [px, py + d], [px - d, py]], dtype=np.int32)
         cv2.polylines(frame_bgr, [pts], True, color, 1, cv2.LINE_AA)
-        # Dual concentric rings
         cv2.circle(frame_bgr, (px, py), 12, color, 2, cv2.LINE_AA)
         cv2.circle(frame_bgr, (px, py), 6, (255, 255, 255), 1, cv2.LINE_AA)
-        # Animated rotating crosshair ticks
         for k in range(4):
             a = phase + k * (np.pi * 0.5)
             ca, sa = float(np.cos(a)), float(np.sin(a))
             p_in = (int(px + ca * 13), int(py + sa * 13))
             p_out = (int(px + ca * 20), int(py + sa * 20))
             cv2.line(frame_bgr, p_in, p_out, color, 2, cv2.LINE_AA)
-        # Glowing core dot & tag
         cv2.circle(frame_bgr, (px, py), 3, (255, 255, 255), -1)
         if label:
             cv2.putText(frame_bgr, label, (px - 6, max(12, py - 21)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, color, 1)
@@ -718,7 +697,6 @@ class MotionTracker:
         left_x = int(w * CV_LEFT_X_THRESHOLD)
         right_x = int(w * CV_RIGHT_X_THRESHOLD)
 
-        # Highlight active zone with sleek translucent cyber neon tint
         in_center_stand = posture == "STAND" and lane == 0
         if posture == "JUMP":
             self._tint_roi(frame_bgr, 0, jump_y, 0, w, (0, 225, 255), 0.25)
@@ -731,20 +709,17 @@ class MotionTracker:
         if in_center_stand:
             self._tint_roi(frame_bgr, jump_y, crouch_y, left_x, right_x, (210, 175, 55), 0.14)
 
-        # Grid divider lines for the 5 Target Boxes (with enlarged center STAND box)
         cv2.line(frame_bgr, (0, jump_y), (w, jump_y), (0, 225, 255) if posture == "JUMP" else (55, 95, 110), 2 if posture == "JUMP" else 1)
         cv2.line(frame_bgr, (0, crouch_y), (w, crouch_y), (255, 200, 35) if posture == "CROUCH" else (95, 85, 55), 2 if posture == "CROUCH" else 1)
         cv2.line(frame_bgr, (left_x, jump_y), (left_x, crouch_y), (245, 210, 56) if lane < 0 else (65, 90, 95), 2 if lane < 0 else 1)
         cv2.line(frame_bgr, (right_x, jump_y), (right_x, crouch_y), (245, 210, 56) if lane > 0 else (65, 90, 95), 2 if lane > 0 else 1)
 
-        # Cyber corner brackets on each of the 5 boxes
         self._draw_corner_brackets(frame_bgr, 3, 3, w - 4, jump_y - 3, (0, 235, 255) if posture == "JUMP" else (65, 110, 130), 2 if posture == "JUMP" else 1, 14)
         self._draw_corner_brackets(frame_bgr, 3, crouch_y + 3, w - 4, h - 4, (255, 210, 45) if posture == "CROUCH" else (110, 95, 60), 2 if posture == "CROUCH" else 1, 14)
         self._draw_corner_brackets(frame_bgr, 3, jump_y + 3, left_x - 3, crouch_y - 3, (245, 220, 75) if lane < 0 else (70, 95, 105), 2 if lane < 0 else 1, 10)
         self._draw_corner_brackets(frame_bgr, right_x + 3, jump_y + 3, w - 4, crouch_y - 3, (245, 220, 75) if lane > 0 else (70, 95, 105), 2 if lane > 0 else 1, 10)
         self._draw_corner_brackets(frame_bgr, left_x + 3, jump_y + 3, right_x - 3, crouch_y - 3, (125, 240, 220) if in_center_stand else (75, 115, 115), 2 if in_center_stand else 1, 16)
 
-        # Clean Box Labels
         cv2.putText(frame_bgr, "UP: JUMP", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (80, 235, 255), 1)
         cv2.putText(frame_bgr, "DOWN: CROUCH", (10, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 210, 60), 1)
         cv2.putText(frame_bgr, "L", (10, (jump_y + crouch_y) // 2 + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (245, 215, 75), 1)

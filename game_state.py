@@ -102,7 +102,6 @@ class GameState:
     motion_peak: float = 0.0
     current_motion: float = 0.0
 
-    # 9 Lives & Progressive Weakness System
     max_lives: int = MAX_CAT_LIVES
     lives_remaining: int = MAX_CAT_LIVES
     deaths_count: int = 0
@@ -114,12 +113,10 @@ class GameState:
     blood_particles: list[BloodParticle] = field(default_factory=list)
     blood_stains: list[BloodStain] = field(default_factory=list)
 
-    # 10-Second Escalating Bounce System (saturates at MAX_BOUNCE_TIER)
     bounce_tier: int = 0
     bounce_multiplier: float = 1.0
     bounce_saturated: bool = False
 
-    # Hand Gesture Menu Start Hold
     gesture_start_hold: float = 0.0
 
     target_lane: int = 0
@@ -459,7 +456,6 @@ class GameState:
                 p.timer -= dt
             self.popups = [p for p in self.popups if p.timer > 0.0]
 
-        # Hand-gesture start/retry when on MENU, BUSTED, or VICTORY
         if self.phase in (Phase.MENU, Phase.BUSTED, Phase.VICTORY):
             if human_posture == "JUMP":
                 self.gesture_start_hold += dt
