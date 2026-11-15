@@ -134,10 +134,11 @@
           }
         }
         const isSkin = (r > 95 && g > 40 && b > 20 && (r - g) > 15 && r > b);
-        if (isMotion || isSkin) {
-          sumX += x / 160;
-          sumY += y / 120;
-          pts++;
+        if (isMotion) {
+          const w = isSkin ? 3 : 1;
+          sumX += (x / 160) * w;
+          sumY += (y / 120) * w;
+          pts += w;
         }
       }
     }
