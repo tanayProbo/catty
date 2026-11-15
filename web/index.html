@@ -31,7 +31,7 @@
     height: 100%;
     display: block;
   }
-  video { display: none; }
+  video { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -48,9 +48,9 @@
 
   // Load sprites
   const SPRITE_NAMES = [
-    "ankh", "burglar_cat", "desert_ground", "desert_sky",
-    "floor_tile_1", "floor_tile_2", "golden_lamp", "mummy_sarcophagus",
-    "pharaoh_mask", "pillar", "pyramid", "ruby", "temple_archway", "tomb_shrine"
+    "ankh", "burglar_cat", "chubby_cat_sketch", "desert_env", "desert_ground", "desert_sky",
+    "floor_tile_1", "floor_tile_2", "floor_tile_3", "golden_lamp", "mummy_sarcophagus",
+    "pharaoh_mask", "pillar", "pyramid", "ruby", "sandstone_wall", "temple_archway", "tomb_shrine"
   ];
   const sprites = {};
   for (const name of SPRITE_NAMES) {
@@ -59,7 +59,6 @@
     sprites[name] = img;
   }
 
-  // Minimal Web Audio synth
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   let actx = null;
   function beep(freq, dur, type = "square", vol = 0.08) {
@@ -77,7 +76,6 @@
     } catch (_) {}
   }
 
-  // Webcam + Pure JS 5-Box CV Tracker (no AI)
   const video = document.getElementById("cam");
   const cvCanvas = document.createElement("canvas");
   cvCanvas.width = 160; cvCanvas.height = 120;
@@ -99,6 +97,7 @@
     navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: "user" } })
       .then(stream => {
         video.srcObject = stream;
+        video.play().catch(() => {});
         cv.live = true;
         cv.status = "CAM 01 - LIVE";
       })
