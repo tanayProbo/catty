@@ -46,7 +46,6 @@
   const W = 1280, H = 720;
   const CORRIDOR_W = W - 310;
 
-  // Load sprites
   const SPRITE_NAMES = [
     "ankh", "burglar_cat", "chubby_cat_sketch", "desert_env", "desert_ground", "desert_sky",
     "floor_tile_1", "floor_tile_2", "floor_tile_3", "golden_lamp", "mummy_sarcophagus",
@@ -162,7 +161,6 @@
     }
   }
 
-  // Keyboard fallback
   const keys = {};
   window.addEventListener("keydown", e => {
     keys[e.code] = true;
@@ -174,7 +172,6 @@
   });
   window.addEventListener("keyup", e => { keys[e.code] = false; });
 
-  // Game State
   const state = {
     phase: "MENU",
     level: 1,
@@ -291,7 +288,6 @@
     state.popups.forEach(p => p.t -= dt);
     state.popups = state.popups.filter(p => p.t > 0);
 
-    // Input merge (CV + Keyboard)
     let wantLane = cv.detected ? cv.lane : 0;
     let wantPosture = cv.detected ? cv.posture : "STAND";
     if (keys["KeyA"] || keys["ArrowLeft"]) wantLane = -1;
@@ -332,7 +328,6 @@
       state.isRolling = false;
     }
 
-    // Phase timers
     if (state.phase === "CREEPING") {
       let spd = (state.isRolling ? 7.2 : 5.4) * (0.58 + 0.42 * state.strength);
       if (state.reincarnateTimer > 0.75) spd *= 0.12;
@@ -382,7 +377,6 @@
 
     spawnAhead();
 
-    // Collisions
     for (const c of state.coinsList) {
       if (!c.got && Math.abs(c.d - state.dist) < 0.8 && Math.abs(c.lane - state.catLanePos) < 0.65) {
         c.got = true;
@@ -436,7 +430,6 @@
     const vx = CORRIDOR_W * 0.5 - state.catLanePos * (W * 0.09);
     const vy = Math.max(90, Math.min(H - 120, H * 0.41 + camH * 0.52));
 
-    // Sky & Pyramids
     if (sprites.desert_sky.complete) ctx.drawImage(sprites.desert_sky, 0, 0, CORRIDOR_W, vy + 18);
     else { ctx.fillStyle = "#2b4263"; ctx.fillRect(0, 0, CORRIDOR_W, vy); }
 
@@ -447,11 +440,9 @@
       }
     }
 
-    // Ground
     if (sprites.desert_ground.complete) ctx.drawImage(sprites.desert_ground, 0, vy, CORRIDOR_W, H - vy);
     else { ctx.fillStyle = "#c2a162"; ctx.fillRect(0, vy, CORRIDOR_W, H - vy); }
 
-    // 3-lane causeway
     const [flx, fly] = project(-1.5, 0, 36, vx, vy, camH);
     const [frx, fry] = project(1.5, 0, 36, vx, vy, camH);
     const [nlx, nly] = project(-1.5, 0, 0.38, vx, vy, camH);
@@ -462,7 +453,6 @@
     ctx.closePath(); ctx.fill();
     ctx.strokeStyle = "#ffd447"; ctx.lineWidth = 3; ctx.stroke();
 
-    // Goal
     const rem = Math.max(1.2, state.goal - state.dist);
     if (rem < 45) {
       const [gx, gy, gs] = project(0, 0.28, rem, vx, vy, camH);
@@ -471,7 +461,6 @@
       if (relic.complete) ctx.drawImage(relic, gx - 55 * gs, gy - 55 * gs, 110 * gs, 110 * gs);
     }
 
-    // Coins & Obstacles
     for (const c of state.coinsList) {
       if (c.got) continue;
       const z = c.d - state.dist;
@@ -509,13 +498,11 @@
       }
     }
 
-    // Blood stains
     for (const b of state.bloodStains) {
       ctx.fillStyle = "rgba(185, 16, 26, 0.75)";
       ctx.beginPath(); ctx.arc(b.x * CORRIDOR_W, b.y * H, b.r, 0, Math.PI * 2); ctx.fill();
     }
 
-    // Cat Foreground (Dying / Reincarnating / Active)
     const catX = CORRIDOR_W * 0.5 + state.catLanePos * 85;
     const catW = 104, catH = 128;
     const catY = H - 42 - catH - state.bounceHeight * 20 - state.jumpHeight * 118;
@@ -539,20 +526,17 @@
       if (sprites.burglar_cat.complete) ctx.drawImage(sprites.burglar_cat, catX - catW / 2, catY, catW, catH);
     }
 
-    // Popups
     ctx.font = "bold 16px Courier New"; ctx.textAlign = "center";
     state.popups.slice(-2).forEach((p, idx) => {
       ctx.fillStyle = p.gold ? "#ffd447" : "#00e5ff";
       ctx.fillText(p.txt, CORRIDOR_W / 2 + p.lane * 135, H * 0.4 - (1 - p.t) * 55 - idx * 24);
     });
 
-    // Blood flash
     if (state.bloodFlash > 0) {
       ctx.fillStyle = `rgba(210, 18, 28, ${0.4 * state.bloodFlash})`;
       ctx.fillRect(0, 0, W, H);
     }
 
-    // Minimal Top HUD
     ctx.textAlign = "left";
     ctx.fillStyle = "#0e1015"; ctx.fillRect(16, 14, CORRIDOR_W - 10, 54);
     ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.strokeRect(16, 14, CORRIDOR_W - 10, 54);
@@ -574,7 +558,6 @@
     ctx.fillStyle = "#222"; ctx.fillRect(285, 38, 340, 14);
     ctx.fillStyle = "#ffd447"; ctx.fillRect(285, 38, 340 * Math.min(1, state.dist / state.goal), 14);
 
-    // Right Sidebar: CAM 01 + 5-Box Cyber HUD
     const sx = W - 298;
     ctx.fillStyle = "#0e1015"; ctx.fillRect(sx, 14, 282, 228);
     ctx.strokeStyle = state.phase === "FREEZE" ? "#ff3b3b" : "#ffffff";
@@ -589,7 +572,6 @@
       ctx.fillStyle = "#151820"; ctx.fillRect(sx + 4, 18, 274, 176);
     }
 
-    // 5-Box Overlay + Reticle
     const jY = 18 + 176 * JUMP_Y, cY = 18 + 176 * CROUCH_Y;
     const lX = sx + 4 + 274 * LEFT_X, rX = sx + 4 + 274 * RIGHT_X;
     ctx.strokeStyle = "rgba(0, 229, 255, 0.55)"; ctx.lineWidth = 1;
@@ -613,7 +595,6 @@
     ctx.fillStyle = cv.motionScore > 18 ? "#ff3b3b" : "#38e54d";
     ctx.fillRect(sx + 12, 222, 258 * Math.min(1, cv.motionScore / 40), 10);
 
-    // Phase Banner
     if (state.phase === "WARNING" || state.phase === "FREEZE") {
       ctx.fillStyle = "#0e1015"; ctx.fillRect(CORRIDOR_W / 2 - 210, 88, 420, 56);
       ctx.strokeStyle = state.phase === "FREEZE" ? "#ff3b3b" : "#ffb830";
@@ -622,7 +603,6 @@
       ctx.fillText(state.phase === "FREEZE" ? `FREEZE! ${state.phaseTimer.toFixed(1)}s` : "LASER SWEEP INCOMING!", CORRIDOR_W / 2, 122);
     }
 
-    // Overlays
     if (state.phase === "MENU" || state.phase === "BUSTED" || state.phase === "VICTORY") {
       ctx.fillStyle = "rgba(10, 12, 16, 0.82)";
       ctx.fillRect(CORRIDOR_W / 2 - 260, H / 2 - 110, 520, 220);
